@@ -1,5 +1,3 @@
-# vim: tabstop=4 shiftwidth=4 softtabstop=4
-
 # Copyright 2011 OpenStack Foundation
 # All Rights Reserved.
 #
@@ -15,22 +13,73 @@
 #    License for the specific language governing permissions and limitations
 #    under the License.
 
+import functools
+
+import eventlet
 import netaddr
+from oslo_serialization import jsonutils
+import six
 
 from nova import exception
-from nova.openstack.common import jsonutils
+from nova.i18n import _
 
 
 def ensure_string_keys(d):
     # http://bugs.python.org/issue4978
-    return dict([(str(k), v) for k, v in d.iteritems()])
+    return {str(k): v for k, v in d.iteritems()}
 
 # Constants for the 'vif_type' field in VIF class
 VIF_TYPE_OVS = 'ovs'
+VIF_TYPE_IVS = 'ivs'
+VIF_TYPE_DVS = 'dvs'
+VIF_TYPE_IOVISOR = 'iovisor'
 VIF_TYPE_BRIDGE = 'bridge'
 VIF_TYPE_802_QBG = '802.1qbg'
 VIF_TYPE_802_QBH = '802.1qbh'
+VIF_TYPE_HW_VEB = 'hw_veb'
+VIF_TYPE_MLNX_DIRECT = 'mlnx_direct'
+VIF_TYPE_MIDONET = 'midonet'
+VIF_TYPE_VHOSTUSER = 'vhostuser'
+VIF_TYPE_VROUTER = 'vrouter'
 VIF_TYPE_OTHER = 'other'
+
+# Constants for dictionary keys in the 'vif_details' field in the VIF
+# class
+VIF_DETAILS_PORT_FILTER = 'port_filter'
+VIF_DETAILS_OVS_HYBRID_PLUG = 'ovs_hybrid_plug'
+VIF_DETAILS_PHYSICAL_NETWORK = 'physical_network'
+
+# The following two constants define the SR-IOV related fields in the
+# 'vif_details'. 'profileid' should be used for VIF_TYPE_802_QBH,
+# 'vlan' for VIF_TYPE_HW_VEB
+VIF_DETAILS_PROFILEID = 'profileid'
+VIF_DETAILS_VLAN = 'vlan'
+
+# Constants for vhost-user related fields in 'vif_details'.
+# Sets mode on vhost-user socket, valid values are 'client'
+# and 'server'
+VIF_DETAILS_VHOSTUSER_MODE = 'vhostuser_mode'
+# vhost-user socket path
+VIF_DETAILS_VHOSTUSER_SOCKET = 'vhostuser_socket'
+# Specifies whether vhost-user socket should be plugged
+# into ovs bridge. Valid values are True and False
+VIF_DETAILS_VHOSTUSER_OVS_PLUG = 'vhostuser_ovs_plug'
+
+# Define supported virtual NIC types. VNIC_TYPE_DIRECT and VNIC_TYPE_MACVTAP
+# are used for SR-IOV ports
+VNIC_TYPE_NORMAL = 'normal'
+VNIC_TYPE_DIRECT = 'direct'
+VNIC_TYPE_MACVTAP = 'macvtap'
+
+# Constants for the 'vif_model' values
+VIF_MODEL_VIRTIO = 'virtio'
+VIF_MODEL_NE2K_PCI = 'ne2k_pci'
+VIF_MODEL_PCNET = 'pcnet'
+VIF_MODEL_RTL8139 = 'rtl8139'
+VIF_MODEL_E1000 = 'e1000'
+VIF_MODEL_E1000E = 'e1000e'
+VIF_MODEL_NETFRONT = 'netfront'
+VIF_MODEL_SPAPR_VLAN = 'spapr-vlan'
 
 # Constant for max length of network interface names
 # eg 'bridge' in the Network class or 'devname' in
@@ -69,11 +118,16 @@ class IP(Model):
         if self['address'] and not self['version']:
             try:
                 self['version'] = netaddr.IPAddress(self['address']).version
-            except netaddr.AddrFormatError as e:
-                raise exception.InvalidIpAddressError(self['address'])
+            except netaddr.AddrFormatError:
+                msg = _("Invalid IP format %s") % self['address']
+                raise exception.InvalidIpAddressError(msg)
 
     def __eq__(self, other):
-        return self['address'] == other['address']
+        keys = ['address', 'type', 'version']
+        return all(self[k] == other[k] for k in keys)
+
+    def __ne__(self, other):
+        return not self.__eq__(other)
 
     def is_in_subnet(self, subnet):
         if self['address'] and subnet['cidr']:
@@ -85,7 +139,7 @@ class IP(Model):
     @classmethod
     def hydrate(cls, ip):
         if ip:
-            return IP(**ensure_string_keys(ip))
+            return cls(**ensure_string_keys(ip))
         return None
 
 
@@ -105,12 +159,19 @@ class FixedIP(IP):
     def floating_ip_addresses(self):
         return [ip['address'] for ip in self['floating_ips']]
 
-    @classmethod
-    def hydrate(cls, fixed_ip):
+    @staticmethod
+    def hydrate(fixed_ip):
         fixed_ip = FixedIP(**ensure_string_keys(fixed_ip))
         fixed_ip['floating_ips'] = [IP.hydrate(floating_ip)
                                    for floating_ip in fixed_ip['floating_ips']]
         return fixed_ip
+
+    def __eq__(self, other):
+        keys = ['address', 'type', 'version', 'floating_ips']
+        return all(self[k] == other[k] for k in keys)
+
+    def __ne__(self, other):
+        return not self.__eq__(other)
 
 
 class Route(Model):
@@ -126,7 +187,7 @@ class Route(Model):
 
     @classmethod
     def hydrate(cls, route):
-        route = Route(**ensure_string_keys(route))
+        route = cls(**ensure_string_keys(route))
         route['gateway'] = IP.hydrate(route['gateway'])
         return route
 
@@ -150,7 +211,11 @@ class Subnet(Model):
             self['version'] = netaddr.IPNetwork(self['cidr']).version
 
     def __eq__(self, other):
-        return self['cidr'] == other['cidr']
+        keys = ['cidr', 'dns', 'gateway', 'ips', 'routes', 'version']
+        return all(self[k] == other[k] for k in keys)
+
+    def __ne__(self, other):
+        return not self.__eq__(other)
 
     def add_route(self, new_route):
         if new_route not in self['routes']:
@@ -170,7 +235,7 @@ class Subnet(Model):
 
     @classmethod
     def hydrate(cls, subnet):
-        subnet = Subnet(**ensure_string_keys(subnet))
+        subnet = cls(**ensure_string_keys(subnet))
         subnet['dns'] = [IP.hydrate(dns) for dns in subnet['dns']]
         subnet['ips'] = [FixedIP.hydrate(ip) for ip in subnet['ips']]
         subnet['routes'] = [Route.hydrate(route) for route in subnet['routes']]
@@ -198,10 +263,17 @@ class Network(Model):
     @classmethod
     def hydrate(cls, network):
         if network:
-            network = Network(**ensure_string_keys(network))
+            network = cls(**ensure_string_keys(network))
             network['subnets'] = [Subnet.hydrate(subnet)
                                   for subnet in network['subnets']]
         return network
+
+    def __eq__(self, other):
+        keys = ['id', 'bridge', 'label', 'subnets']
+        return all(self[k] == other[k] for k in keys)
+
+    def __ne__(self, other):
+        return not self.__eq__(other)
 
 
 class VIF8021QbgParams(Model):
@@ -224,25 +296,38 @@ class VIF8021QbhParams(Model):
 class VIF(Model):
     """Represents a Virtual Interface in Nova."""
     def __init__(self, id=None, address=None, network=None, type=None,
-                 devname=None, ovs_interfaceid=None,
-                 qbh_params=None, qbg_params=None,
-                 **kwargs):
+                 details=None, devname=None, ovs_interfaceid=None,
+                 qbh_params=None, qbg_params=None, active=False,
+                 vnic_type=VNIC_TYPE_NORMAL, profile=None,
+                 preserve_on_delete=False, **kwargs):
         super(VIF, self).__init__()
 
         self['id'] = id
         self['address'] = address
         self['network'] = network or None
         self['type'] = type
+        self['details'] = details or {}
         self['devname'] = devname
 
         self['ovs_interfaceid'] = ovs_interfaceid
         self['qbh_params'] = qbh_params
         self['qbg_params'] = qbg_params
+        self['active'] = active
+        self['vnic_type'] = vnic_type
+        self['profile'] = profile
+        self['preserve_on_delete'] = preserve_on_delete
 
         self._set_meta(kwargs)
 
     def __eq__(self, other):
-        return self['id'] == other['id']
+        keys = ['id', 'address', 'network', 'vnic_type',
+                'type', 'profile', 'details', 'devname',
+                'ovs_interfaceid', 'qbh_params', 'qbg_params',
+                'active', 'preserve_on_delete']
+        return all(self[k] == other[k] for k in keys)
+
+    def __ne__(self, other):
+        return not self.__eq__(other)
 
     def fixed_ips(self):
         return [fixed_ip for subnet in self['network']['subnets']
@@ -286,9 +371,21 @@ class VIF(Model):
                     'ips': ips}
         return []
 
+    def is_hybrid_plug_enabled(self):
+        return self['details'].get(VIF_DETAILS_OVS_HYBRID_PLUG, False)
+
+    def is_neutron_filtering_enabled(self):
+        return self['details'].get(VIF_DETAILS_PORT_FILTER, False)
+
+    def get_physical_network(self):
+        phy_network = self['network']['meta'].get('physical_network')
+        if not phy_network:
+            phy_network = self['details'].get(VIF_DETAILS_PHYSICAL_NETWORK)
+        return phy_network
+
     @classmethod
     def hydrate(cls, vif):
-        vif = VIF(**ensure_string_keys(vif))
+        vif = cls(**ensure_string_keys(vif))
         vif['network'] = Network.hydrate(vif['network'])
         return vif
 
@@ -315,122 +412,89 @@ class NetworkInfo(list):
 
     @classmethod
     def hydrate(cls, network_info):
-        if isinstance(network_info, basestring):
+        if isinstance(network_info, six.string_types):
             network_info = jsonutils.loads(network_info)
-        return NetworkInfo([VIF.hydrate(vif) for vif in network_info])
+        return cls([VIF.hydrate(vif) for vif in network_info])
 
     def json(self):
         return jsonutils.dumps(self)
 
-    def legacy(self):
+    def wait(self, do_raise=True):
+        """A no-op method.
+
+        This is useful to avoid type checking when NetworkInfo might be
+        subclassed with NetworkInfoAsyncWrapper.
         """
-        Return the legacy network_info representation of self
-        """
-        def get_ip(ip):
-            if not ip:
-                return None
-            return ip['address']
+        pass
 
-        def fixed_ip_dict(ip, subnet):
-            netmask = get_netmask(ip, subnet)
 
-            return {'ip': ip['address'],
-                    'enabled': '1',
-                    'netmask': netmask,
-                    'gateway': get_ip(subnet['gateway'])}
+class NetworkInfoAsyncWrapper(NetworkInfo):
+    """Wrapper around NetworkInfo that allows retrieving NetworkInfo
+    in an async manner.
 
-        def convert_routes(routes):
-            routes_list = []
-            for route in routes:
-                r = {'route': str(netaddr.IPNetwork(route['cidr']).network),
-                     'netmask': str(netaddr.IPNetwork(route['cidr']).netmask),
-                     'gateway': get_ip(route['gateway'])}
-                routes_list.append(r)
-            return routes_list
+    This allows one to start querying for network information before
+    you know you will need it.  If you have a long-running
+    operation, this allows the network model retrieval to occur in the
+    background.  When you need the data, it will ensure the async
+    operation has completed.
 
-        network_info = []
-        for vif in self:
-            # if vif doesn't have network or that network has no subnets, quit
-            if not vif['network'] or not vif['network']['subnets']:
-                continue
-            network = vif['network']
+    As an example:
 
-            # NOTE(jkoelker) The legacy format only supports one subnet per
-            #                network, so we only use the 1st one of each type
-            # NOTE(tr3buchet): o.O
-            v4_subnets = []
-            v6_subnets = []
-            for subnet in vif['network']['subnets']:
-                if subnet['version'] == 4:
-                    v4_subnets.append(subnet)
-                else:
-                    v6_subnets.append(subnet)
+    def allocate_net_info(arg1, arg2)
+        return call_neutron_to_allocate(arg1, arg2)
 
-            subnet_v4 = None
-            subnet_v6 = None
+    network_info = NetworkInfoAsyncWrapper(allocate_net_info, arg1, arg2)
+    [do a long running operation -- real network_info will be retrieved
+    in the background]
+    [do something with network_info]
+    """
 
-            if v4_subnets:
-                subnet_v4 = v4_subnets[0]
+    def __init__(self, async_method, *args, **kwargs):
+        self._gt = eventlet.spawn(async_method, *args, **kwargs)
+        methods = ['json', 'fixed_ips', 'floating_ips']
+        for method in methods:
+            fn = getattr(self, method)
+            wrapper = functools.partial(self._sync_wrapper, fn)
+            functools.update_wrapper(wrapper, fn)
+            setattr(self, method, wrapper)
 
-            if v6_subnets:
-                subnet_v6 = v6_subnets[0]
+    def _sync_wrapper(self, wrapped, *args, **kwargs):
+        """Synchronize the model before running a method."""
+        self.wait()
+        return wrapped(*args, **kwargs)
 
-            if not subnet_v4:
-                msg = _('v4 subnets are required for legacy nw_info')
-                raise exception.NovaException(message=msg)
+    def __getitem__(self, *args, **kwargs):
+        fn = super(NetworkInfoAsyncWrapper, self).__getitem__
+        return self._sync_wrapper(fn, *args, **kwargs)
 
-            routes = convert_routes(subnet_v4['routes'])
-            should_create_bridge = network.get_meta('should_create_bridge',
-                                                    False)
-            should_create_vlan = network.get_meta('should_create_vlan', False)
-            gateway = get_ip(subnet_v4['gateway'])
-            dhcp_server = subnet_v4.get_meta('dhcp_server', gateway)
+    def __iter__(self, *args, **kwargs):
+        fn = super(NetworkInfoAsyncWrapper, self).__iter__
+        return self._sync_wrapper(fn, *args, **kwargs)
 
-            network_dict = {
-                'bridge': network['bridge'],
-                'id': network['id'],
-                'cidr': subnet_v4['cidr'],
-                'cidr_v6': subnet_v6['cidr'] if subnet_v6 else None,
-                'vlan': network.get_meta('vlan'),
-                'injected': network.get_meta('injected', False),
-                'multi_host': network.get_meta('multi_host', False),
-                'bridge_interface': network.get_meta('bridge_interface')
-            }
-            # NOTE(tr3buchet): 'ips' bit here is tricky, we support a single
-            #                  subnet but we want all the IPs to be there
-            #                  so use the v4_subnets[0] and its IPs are first
-            #                  so that eth0 will be from subnet_v4, the rest of
-            #                  the IPs will be aliased eth0:1 etc and the
-            #                  gateways from their subnets will not be used
-            info_dict = {'label': network['label'],
-                         'broadcast': str(subnet_v4.as_netaddr().broadcast),
-                         'mac': vif['address'],
-                         'vif_type': vif['type'],
-                         'vif_devname': vif.get('devname'),
-                         'vif_uuid': vif['id'],
-                         'ovs_interfaceid': vif.get('ovs_interfaceid'),
-                         'qbh_params': vif.get('qbh_params'),
-                         'qbg_params': vif.get('qbg_params'),
-                         'rxtx_cap': vif.get_meta('rxtx_cap', 0),
-                         'dns': [get_ip(ip) for ip in subnet_v4['dns']],
-                         'ips': [fixed_ip_dict(ip, subnet)
-                                 for subnet in v4_subnets
-                                 for ip in subnet['ips']],
-                         'should_create_bridge': should_create_bridge,
-                         'should_create_vlan': should_create_vlan,
-                         'dhcp_server': dhcp_server}
-            if routes:
-                info_dict['routes'] = routes
+    def __len__(self, *args, **kwargs):
+        fn = super(NetworkInfoAsyncWrapper, self).__len__
+        return self._sync_wrapper(fn, *args, **kwargs)
 
-            if gateway:
-                info_dict['gateway'] = gateway
+    def __str__(self, *args, **kwargs):
+        fn = super(NetworkInfoAsyncWrapper, self).__str__
+        return self._sync_wrapper(fn, *args, **kwargs)
 
-            if v6_subnets:
-                if subnet_v6['gateway']:
-                    info_dict['gateway_v6'] = get_ip(subnet_v6['gateway'])
-                # NOTE(tr3buchet): only supporting single v6 subnet here
-                info_dict['ip6s'] = [fixed_ip_dict(ip, subnet_v6)
-                                     for ip in subnet_v6['ips']]
+    def __repr__(self, *args, **kwargs):
+        fn = super(NetworkInfoAsyncWrapper, self).__repr__
+        return self._sync_wrapper(fn, *args, **kwargs)
 
-            network_info.append((network_dict, info_dict))
-        return network_info
+    def wait(self, do_raise=True):
+        """Wait for async call to finish."""
+        if self._gt is not None:
+            try:
+                # NOTE(comstud): This looks funky, but this object is
+                # subclassed from list.  In other words, 'self' is really
+                # just a list with a bunch of extra methods.  So this
+                # line just replaces the current list (which should be
+                # empty) with the result.
+                self[:] = self._gt.wait()
+            except Exception:
+                if do_raise:
+                    raise
+            finally:
+                self._gt = None

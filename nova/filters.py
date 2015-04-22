@@ -17,8 +17,10 @@
 Filter support
 """
 
+from oslo_log import log as logging
+
+from nova.i18n import _LI
 from nova import loadables
-from nova.openstack.common import log as logging
 
 LOG = logging.getLogger(__name__)
 
@@ -34,13 +36,27 @@ class BaseFilter(object):
     def filter_all(self, filter_obj_list, filter_properties):
         """Yield objects that pass the filter.
 
-        Can be overriden in a subclass, if you need to base filtering
+        Can be overridden in a subclass, if you need to base filtering
         decisions on all objects.  Otherwise, one can just override
         _filter_one() to filter a single object.
         """
         for obj in filter_obj_list:
             if self._filter_one(obj, filter_properties):
                 yield obj
+
+    # Set to true in a subclass if a filter only needs to be run once
+    # for each request rather than for each instance
+    run_filter_once_per_request = False
+
+    def run_filter_for_index(self, index):
+        """Return True if the filter needs to be run for the "index-th"
+        instance in a request.  Only need to override this if a filter
+        needs anything other than "first only" or "all" behaviour.
+        """
+        if self.run_filter_once_per_request and index > 0:
+            return False
+        else:
+            return True
 
 
 class BaseFilterHandler(loadables.BaseLoader):
@@ -49,13 +65,21 @@ class BaseFilterHandler(loadables.BaseLoader):
     This class should be subclassed where one needs to use filters.
     """
 
-    def get_filtered_objects(self, filter_classes, objs,
-            filter_properties):
+    def get_filtered_objects(self, filters, objs, filter_properties, index=0):
         list_objs = list(objs)
         LOG.debug("Starting with %d host(s)", len(list_objs))
-        for filter_cls in filter_classes:
-            list_objs = list(filter_cls().filter_all(list_objs,
-                             filter_properties))
-            LOG.debug("Filter %s returned %d host(s)",
-                      filter_cls.__name__, len(list_objs))
+        for filter in filters:
+            if filter.run_filter_for_index(index):
+                cls_name = filter.__class__.__name__
+                objs = filter.filter_all(list_objs, filter_properties)
+                if objs is None:
+                    LOG.debug("Filter %s says to stop filtering", cls_name)
+                    return
+                list_objs = list(objs)
+                if not list_objs:
+                    LOG.info(_LI("Filter %s returned 0 hosts"), cls_name)
+                    break
+                LOG.debug("Filter %(cls_name)s returned "
+                          "%(obj_len)d host(s)",
+                          {'cls_name': cls_name, 'obj_len': len(list_objs)})
         return list_objs

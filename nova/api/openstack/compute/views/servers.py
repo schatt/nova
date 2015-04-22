@@ -1,5 +1,3 @@
-# vim: tabstop=4 shiftwidth=4 softtabstop=4
-
 # Copyright 2010-2011 OpenStack Foundation
 # Copyright 2011 Piston Cloud Computing, Inc.
 # All Rights Reserved.
@@ -18,13 +16,16 @@
 
 import hashlib
 
+from oslo_log import log as logging
+from oslo_utils import timeutils
+
 from nova.api.openstack import common
 from nova.api.openstack.compute.views import addresses as views_addresses
 from nova.api.openstack.compute.views import flavors as views_flavors
 from nova.api.openstack.compute.views import images as views_images
-from nova.compute import flavors
-from nova.openstack.common import log as logging
-from nova.openstack.common import timeutils
+from nova.i18n import _LW
+from nova.objects import base as obj_base
+from nova import utils
 
 
 LOG = logging.getLogger(__name__)
@@ -41,10 +42,11 @@ class ViewBuilder(common.ViewBuilder):
         "REBUILD",
         "RESIZE",
         "VERIFY_RESIZE",
+        "MIGRATING",
     )
 
     _fault_statuses = (
-        "ERROR",
+        "ERROR", "DELETED"
     )
 
     def __init__(self):
@@ -53,14 +55,6 @@ class ViewBuilder(common.ViewBuilder):
         self._address_builder = views_addresses.ViewBuilder()
         self._flavor_builder = views_flavors.ViewBuilder()
         self._image_builder = views_images.ViewBuilder()
-
-    def _skip_precooked(func):
-        def wrapped(self, request, instance):
-            if instance.get("_is_precooked"):
-                return dict(server=instance)
-            else:
-                return func(self, request, instance)
-        return wrapped
 
     def create(self, request, instance):
         """View that should be returned when an instance is created."""
@@ -73,7 +67,6 @@ class ViewBuilder(common.ViewBuilder):
             },
         }
 
-    @_skip_precooked
     def basic(self, request, instance):
         """Generic, non-detailed view of an instance."""
         return {
@@ -86,14 +79,15 @@ class ViewBuilder(common.ViewBuilder):
             },
         }
 
-    @_skip_precooked
     def show(self, request, instance):
         """Detailed view of a single instance."""
+        ip_v4 = instance.get('access_ip_v4')
+        ip_v6 = instance.get('access_ip_v6')
         server = {
             "server": {
                 "id": instance["uuid"],
                 "name": instance["display_name"],
-                "status": self._get_vm_state(instance),
+                "status": self._get_vm_status(instance),
                 "tenant_id": instance.get("project_id") or "",
                 "user_id": instance.get("user_id") or "",
                 "metadata": self._get_metadata(instance),
@@ -103,16 +97,17 @@ class ViewBuilder(common.ViewBuilder):
                 "created": timeutils.isotime(instance["created_at"]),
                 "updated": timeutils.isotime(instance["updated_at"]),
                 "addresses": self._get_addresses(request, instance),
-                "accessIPv4": instance.get("access_ip_v4") or "",
-                "accessIPv6": instance.get("access_ip_v6") or "",
+                "accessIPv4": str(ip_v4) if ip_v4 is not None else '',
+                "accessIPv6": str(ip_v6) if ip_v6 is not None else '',
                 "links": self._get_links(request,
                                          instance["uuid"],
                                          self._collection_name),
             },
         }
-        _inst_fault = self._get_fault(request, instance)
-        if server["server"]["status"] in self._fault_statuses and _inst_fault:
-            server['server']['fault'] = _inst_fault
+        if server["server"]["status"] in self._fault_statuses:
+            _inst_fault = self._get_fault(request, instance)
+            if _inst_fault:
+                server['server']['fault'] = _inst_fault
 
         if server["server"]["status"] in self._progress_statuses:
             server["server"]["progress"] = instance.get("progress", 0)
@@ -121,18 +116,28 @@ class ViewBuilder(common.ViewBuilder):
 
     def index(self, request, instances):
         """Show a list of servers without many details."""
-        return self._list_view(self.basic, request, instances)
+        coll_name = self._collection_name
+        return self._list_view(self.basic, request, instances, coll_name)
 
     def detail(self, request, instances):
         """Detailed view of a list of instance."""
-        return self._list_view(self.show, request, instances)
+        coll_name = self._collection_name + '/detail'
+        return self._list_view(self.show, request, instances, coll_name)
 
-    def _list_view(self, func, request, servers):
-        """Provide a view for a list of servers."""
+    def _list_view(self, func, request, servers, coll_name):
+        """Provide a view for a list of servers.
+
+        :param func: Function used to format the server data
+        :param request: API request
+        :param servers: List of servers in dictionary format
+        :param coll_name: Name of collection, used to generate the next link
+                          for a pagination query
+        :returns: Server data in dictionary format
+        """
         server_list = [func(request, server)["server"] for server in servers]
         servers_links = self._get_collection_links(request,
                                                    servers,
-                                                   self._collection_name)
+                                                   coll_name)
         servers_dict = dict(servers=server_list)
 
         if servers_links:
@@ -142,11 +147,18 @@ class ViewBuilder(common.ViewBuilder):
 
     @staticmethod
     def _get_metadata(instance):
-        metadata = instance.get("metadata", [])
-        return dict((item['key'], item['value']) for item in metadata)
+        # FIXME(danms): Transitional support for objects
+        metadata = instance.get('metadata')
+        if isinstance(instance, obj_base.NovaObject):
+            return metadata or {}
+        else:
+            return utils.instance_meta(instance)
 
     @staticmethod
-    def _get_vm_state(instance):
+    def _get_vm_status(instance):
+        # If the instance is deleted the vm and task states don't really matter
+        if instance.get("deleted"):
+            return "DELETED"
         return common.status_from_state(instance.get("vm_state"),
                                         instance.get("task_state"))
 
@@ -155,13 +167,14 @@ class ViewBuilder(common.ViewBuilder):
         host = instance.get("host")
         project = str(instance.get("project_id"))
         if host:
-            sha_hash = hashlib.sha224(project + host)  # pylint: disable=E1101
+            sha_hash = hashlib.sha224(project + host)
             return sha_hash.hexdigest()
 
-    def _get_addresses(self, request, instance):
+    def _get_addresses(self, request, instance, extend_address=False):
         context = request.environ["nova.context"]
         networks = common.get_networks_for_instance(context, instance)
-        return self._address_builder.index(networks)["addresses"]
+        return self._address_builder.index(networks,
+                                           extend_address)["addresses"]
 
     def _get_image(self, request, instance):
         image_ref = instance["image_ref"]
@@ -181,10 +194,10 @@ class ViewBuilder(common.ViewBuilder):
             return ""
 
     def _get_flavor(self, request, instance):
-        instance_type = flavors.extract_instance_type(instance)
+        instance_type = instance.get_flavor()
         if not instance_type:
-            LOG.warn(_("Instance has had its instance_type removed "
-                    "from the DB"), instance=instance)
+            LOG.warning(_LW("Instance has had its instance_type removed "
+                            "from the DB"), instance=instance)
             return {}
         flavor_id = instance_type["flavorid"]
         flavor_bookmark = self._flavor_builder._get_bookmark_link(request,
@@ -199,7 +212,8 @@ class ViewBuilder(common.ViewBuilder):
         }
 
     def _get_fault(self, request, instance):
-        fault = instance.get("fault", None)
+        # This can result in a lazy load of the fault information
+        fault = instance.fault
 
         if not fault:
             return None
@@ -220,3 +234,50 @@ class ViewBuilder(common.ViewBuilder):
                 fault_dict['details'] = fault["details"]
 
         return fault_dict
+
+
+class ViewBuilderV3(ViewBuilder):
+    """Model a server V3 API response as a python dictionary."""
+
+    def __init__(self):
+        """Initialize view builder."""
+        super(ViewBuilderV3, self).__init__()
+        self._address_builder = views_addresses.ViewBuilderV3()
+        # TODO(alex_xu): In V3 API, we correct the image bookmark link to
+        # use glance endpoint. We revert back it to use nova endpoint for v2.1.
+        self._image_builder = views_images.ViewBuilder()
+
+    def show(self, request, instance, extend_address=True):
+        """Detailed view of a single instance."""
+        server = {
+            "server": {
+                "id": instance["uuid"],
+                "name": instance["display_name"],
+                "status": self._get_vm_status(instance),
+                "tenant_id": instance.get("project_id") or "",
+                "user_id": instance.get("user_id") or "",
+                "metadata": self._get_metadata(instance),
+                "hostId": self._get_host_id(instance) or "",
+                # TODO(alex_xu): '_get_image' return {} when there image_ref
+                # isn't existed in V3 API, we revert it back to return "" in
+                # V2.1.
+                "image": self._get_image(request, instance),
+                "flavor": self._get_flavor(request, instance),
+                "created": timeutils.isotime(instance["created_at"]),
+                "updated": timeutils.isotime(instance["updated_at"]),
+                "addresses": self._get_addresses(request, instance,
+                                                 extend_address),
+                "links": self._get_links(request,
+                                         instance["uuid"],
+                                         self._collection_name),
+            },
+        }
+        if server["server"]["status"] in self._fault_statuses:
+            _inst_fault = self._get_fault(request, instance)
+            if _inst_fault:
+                server['server']['fault'] = _inst_fault
+
+        if server["server"]["status"] in self._progress_statuses:
+            server["server"]["progress"] = instance.get("progress", 0)
+
+        return server

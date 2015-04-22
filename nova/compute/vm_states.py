@@ -1,5 +1,3 @@
-# vim: tabstop=4 shiftwidth=4 softtabstop=4
-
 # Copyright 2010 OpenStack Foundation
 # All Rights Reserved.
 #
@@ -44,3 +42,11 @@ SOFT_DELETED = 'soft-delete'  # VM is marked as deleted but the disk images are
 DELETED = 'deleted'  # VM is permanently deleted.
 
 ERROR = 'error'
+
+SHELVED = 'shelved'  # VM is powered off, resources still on hypervisor
+SHELVED_OFFLOADED = 'shelved_offloaded'  # VM and associated resources are
+# not on hypervisor
+
+ALLOW_SOFT_REBOOT = [ACTIVE]  # states we can soft reboot from
+ALLOW_HARD_REBOOT = ALLOW_SOFT_REBOOT + [STOPPED, PAUSED, SUSPENDED, ERROR]
+# states we allow hard reboot from

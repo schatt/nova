@@ -15,15 +15,17 @@
 #    License for the specific language governing permissions and limitations
 #    under the License.
 
-"""Fetch Bandwidth data from VIF network devices."""
+# NOTE: XenServer still only supports Python 2.4 in it's dom0 userspace
+# which means the Nova xenapi plugins must use only Python 2.4 features
 
-import os
-import shutil
+"""Fetch Bandwidth data from VIF network devices."""
 
 import utils
 
-from pluginlib_nova import *
-configure_logging('bandwidth')
+import pluginlib_nova
+
+
+pluginlib_nova.configure_logging('bandwidth')
 
 
 def _read_proc_net():

@@ -1,5 +1,6 @@
 # Copyright (c) 2012 Rackspace Hosting
 # All Rights Reserved.
+# Copyright 2013 Red Hat, Inc.
 #
 #    Licensed under the Apache License, Version 2.0 (the "License"); you may
 #    not use this file except in compliance with the License. You may obtain
@@ -16,12 +17,11 @@
 """
 Cells RPC Communication Driver
 """
-from oslo.config import cfg
+from oslo_config import cfg
+import oslo_messaging as messaging
 
 from nova.cells import driver
-from nova.openstack.common import rpc
-from nova.openstack.common.rpc import dispatcher as rpc_dispatcher
-from nova.openstack.common.rpc import proxy as rpc_proxy
+from nova import rpc
 
 cell_rpc_driver_opts = [
         cfg.StrOpt('rpc_driver_queue_base',
@@ -34,7 +34,9 @@ CONF = cfg.CONF
 CONF.register_opts(cell_rpc_driver_opts, group='cells')
 CONF.import_opt('call_timeout', 'nova.cells.opts', group='cells')
 
-_CELL_TO_CELL_RPC_API_VERSION = '1.0'
+rpcapi_cap_opt = cfg.StrOpt('intercell',
+        help='Set a version cap for messages sent between cells services')
+CONF.register_opt(rpcapi_cap_opt, 'upgrade_levels')
 
 
 class CellsRPCDriver(driver.BaseCellsDriver):
@@ -48,27 +50,16 @@ class CellsRPCDriver(driver.BaseCellsDriver):
     One instance is also created by the cells manager for setting up
     the consumers.
     """
-    BASE_RPC_API_VERSION = _CELL_TO_CELL_RPC_API_VERSION
 
     def __init__(self, *args, **kwargs):
         super(CellsRPCDriver, self).__init__(*args, **kwargs)
-        self.rpc_connections = []
-        self.intercell_rpcapi = InterCellRPCAPI(
-                self.BASE_RPC_API_VERSION)
+        self.rpc_servers = []
+        self.intercell_rpcapi = InterCellRPCAPI()
 
-    def _start_consumer(self, dispatcher, topic):
-        """Start an RPC consumer."""
-        conn = rpc.create_connection(new=True)
-        conn.create_consumer(topic, dispatcher, fanout=False)
-        conn.create_consumer(topic, dispatcher, fanout=True)
-        self.rpc_connections.append(conn)
-        conn.consume_in_thread()
-        return conn
+    def start_servers(self, msg_runner):
+        """Start RPC servers.
 
-    def start_consumers(self, msg_runner):
-        """Start RPC consumers.
-
-        Start up 2 separate consumers for handling inter-cell
+        Start up 2 separate servers for handling inter-cell
         communication via RPC.  Both handle the same types of
         messages, but requests/replies are separated to solve
         potential deadlocks. (If we used the same queue for both,
@@ -77,51 +68,78 @@ class CellsRPCDriver(driver.BaseCellsDriver):
         """
         topic_base = CONF.cells.rpc_driver_queue_base
         proxy_manager = InterCellRPCDispatcher(msg_runner)
-        dispatcher = rpc_dispatcher.RpcDispatcher([proxy_manager])
         for msg_type in msg_runner.get_message_types():
-            topic = '%s.%s' % (topic_base, msg_type)
-            self._start_consumer(dispatcher, topic)
+            target = messaging.Target(topic='%s.%s' % (topic_base, msg_type),
+                                      server=CONF.host)
+            # NOTE(comstud): We do not need to use the object serializer
+            # on this because object serialization is taken care for us in
+            # the nova.cells.messaging module.
+            server = rpc.get_server(target, endpoints=[proxy_manager])
+            server.start()
+            self.rpc_servers.append(server)
 
-    def stop_consumers(self):
-        """Stop RPC consumers.
+    def stop_servers(self):
+        """Stop RPC servers.
 
         NOTE: Currently there's no hooks when stopping services
         to have managers cleanup, so this is not currently called.
         """
-        for conn in self.rpc_connections:
-            conn.close()
+        for server in self.rpc_servers:
+            server.stop()
 
     def send_message_to_cell(self, cell_state, message):
         """Use the IntercellRPCAPI to send a message to a cell."""
         self.intercell_rpcapi.send_message_to_cell(cell_state, message)
 
 
-class InterCellRPCAPI(rpc_proxy.RpcProxy):
+class InterCellRPCAPI(object):
     """Client side of the Cell<->Cell RPC API.
 
     The CellsRPCDriver uses this to make calls to another cell.
 
     API version history:
         1.0 - Initial version.
-    """
-    def __init__(self, default_version):
-        super(InterCellRPCAPI, self).__init__(None, default_version)
 
-    @staticmethod
-    def _get_server_params_for_cell(next_hop):
-        """Turn the DB information for a cell into the parameters
-        needed for the RPC call.
+        ... Grizzly supports message version 1.0.  So, any changes to existing
+        methods in 2.x after that point should be done such that they can
+        handle the version_cap being set to 1.0.
+    """
+
+    VERSION_ALIASES = {
+        'grizzly': '1.0',
+    }
+
+    def __init__(self):
+        super(InterCellRPCAPI, self).__init__()
+        self.version_cap = (
+            self.VERSION_ALIASES.get(CONF.upgrade_levels.intercell,
+                                     CONF.upgrade_levels.intercell))
+        self.transports = {}
+
+    def _get_client(self, next_hop, topic):
+        """Turn the DB information for a cell into a messaging.RPCClient."""
+        transport = self._get_transport(next_hop)
+        target = messaging.Target(topic=topic, version='1.0')
+        serializer = rpc.RequestContextSerializer(None)
+        return messaging.RPCClient(transport,
+                                   target,
+                                   version_cap=self.version_cap,
+                                   serializer=serializer)
+
+    def _get_transport(self, next_hop):
+        """NOTE(belliott) Each Transport object contains connection pool
+        state.  Maintain references to them to avoid continual reconnects
+        to the message broker.
         """
-        param_map = {'username': 'username',
-                     'password': 'password',
-                     'rpc_host': 'hostname',
-                     'rpc_port': 'port',
-                     'rpc_virtual_host': 'virtual_host'}
-        server_params = {}
-        for source, target in param_map.items():
-            if next_hop.db_info[source]:
-                server_params[target] = next_hop.db_info[source]
-        return server_params
+        transport_url = next_hop.db_info['transport_url']
+        if transport_url not in self.transports:
+            transport = messaging.get_transport(cfg.CONF, transport_url,
+                                                rpc.TRANSPORT_ALIASES)
+            self.transports[transport_url] = transport
+        else:
+            transport = self.transports[transport_url]
+
+        return transport
 
     def send_message_to_cell(self, cell_state, message):
         """Send a message to another cell by JSON-ifying the message and
@@ -129,18 +147,13 @@ class InterCellRPCAPI(rpc_proxy.RpcProxy):
         fanout, do it.  The topic that is used will be
         'CONF.rpc_driver_queue_base.<message_type>'.
         """
-        ctxt = message.ctxt
-        json_message = message.to_json()
-        rpc_message = self.make_msg('process_message', message=json_message)
         topic_base = CONF.cells.rpc_driver_queue_base
         topic = '%s.%s' % (topic_base, message.message_type)
-        server_params = self._get_server_params_for_cell(cell_state)
+        cctxt = self._get_client(cell_state, topic)
         if message.fanout:
-            self.fanout_cast_to_server(ctxt, server_params,
-                    rpc_message, topic=topic)
-        else:
-            self.cast_to_server(ctxt, server_params,
-                    rpc_message, topic=topic)
+            cctxt = cctxt.prepare(fanout=message.fanout)
+        return cctxt.cast(message.ctxt, 'process_message',
+                          message=message.to_json())
 
 
 class InterCellRPCDispatcher(object):
@@ -149,9 +162,10 @@ class InterCellRPCDispatcher(object):
     All messages received here have come from a sibling cell.  Depending
     on the ultimate target and type of message, we may process the message
     in this cell, relay the message to another sibling cell, or both.  This
-    logic is defined by the message class in the messaging module.
+    logic is defined by the message class in the nova.cells.messaging module.
     """
-    BASE_RPC_API_VERSION = _CELL_TO_CELL_RPC_API_VERSION
+
+    target = messaging.Target(version='1.0')
 
     def __init__(self, msg_runner):
         """Init the Intercell RPC Dispatcher."""

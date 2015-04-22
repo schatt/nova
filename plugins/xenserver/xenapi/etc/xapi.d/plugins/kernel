@@ -18,6 +18,9 @@
 #    License for the specific language governing permissions and limitations
 #    under the License.
 
+# NOTE: XenServer still only supports Python 2.4 in it's dom0 userspace
+# which means the Nova xenapi plugins must use only Python 2.4 features
+
 """Handle the manipulation of kernel images."""
 
 import errno
@@ -26,9 +29,15 @@ import shutil
 
 import XenAPIPlugin
 
-#FIXME(sirp): should this use pluginlib from 5.6?
-from pluginlib_nova import *
-configure_logging('kernel')
+import pluginlib_nova
+
+
+pluginlib_nova.configure_logging('kernel')
+logging = pluginlib_nova.logging
+exists = pluginlib_nova.exists
+optional = pluginlib_nova.optional
+with_vdi_in_dom0 = pluginlib_nova.with_vdi_in_dom0
+
 
 KERNEL_DIR = '/boot/guest'
 

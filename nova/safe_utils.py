@@ -1,5 +1,3 @@
-# vim: tabstop=4 shiftwidth=4 softtabstop=4
-
 # Copyright 2010 United States Government as represented by the
 # Administrator of the National Aeronautics and Space Administration.
 # Copyright 2011 Justin Santa Barbara
@@ -32,7 +30,7 @@ def getcallargs(function, *args, **kwargs):
 
     keyed_args.update(kwargs)
 
-    #NOTE(alaski) the implicit 'self' or 'cls' argument shows up in
+    # NOTE(alaski) the implicit 'self' or 'cls' argument shows up in
     # argnames but not in args or kwargs.  Uses 'in' rather than '==' because
     # some tests use 'self2'.
     if 'self' in argnames[0] or 'cls' == argnames[0]:

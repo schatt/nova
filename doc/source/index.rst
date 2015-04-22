@@ -47,16 +47,28 @@ Developer Docs
    :maxdepth: 1
 
    devref/index
+   man/index
+   support-matrix
+
+Compute API v2
+==============
+
+.. toctree::
+   :glob:
+   :maxdepth: 1
+
+   v2/*
 
 API Extensions
 ==============
 
-Go to http://api.openstack.org for information about Compute API extensions.
+Go to the `API Complete Reference v2.1 (CURRENT)`_ for information about the Compute API.
+We still support the older `API Complete Reference v2 (SUPPORTED)`_ and its extensions
+`API Complete Reference v2 extensions (SUPPORTED)`_
 
-Outstanding Documentation Tasks
-===============================
-
-.. todolist::
+.. _`API Complete Reference v2.1 (CURRENT)`: http://developer.openstack.org/api-ref-compute-v2.1.html
+.. _`API Complete Reference v2 (SUPPORTED)`: http://developer.openstack.org/api-ref-compute-v2.html
+.. _`API Complete Reference v2 extensions (SUPPORTED)`: http://developer.openstack.org/api-ref-compute-v2-ext.html
 
 Indices and tables
 ==================

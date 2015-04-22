@@ -1,5 +1,3 @@
-# vim: tabstop=4 shiftwidth=4 softtabstop=4
-#
 # Copyright 2013 Cloudbase Solutions Srl
 # All Rights Reserved.
 #
@@ -25,6 +23,7 @@ import uuid
 if sys.platform == 'win32':
     import wmi
 
+from nova.i18n import _
 from nova.virt.hyperv import vmutils
 
 
@@ -49,7 +48,7 @@ class NetworkUtils(object):
 
     def create_vswitch_port(self, vswitch_path, port_name):
         switch_svc = self._conn.Msvm_VirtualSwitchManagementService()[0]
-        #Create a port on the vswitch.
+        # Create a port on the vswitch.
         (new_port, ret_val) = switch_svc.CreateSwitchPort(
             Name=str(uuid.uuid4()),
             FriendlyName=port_name,
@@ -58,5 +57,12 @@ class NetworkUtils(object):
         if ret_val != 0:
             raise vmutils.HyperVException(_("Failed to create vswitch port "
                                             "%(port_name)s on switch "
-                                            "%(vswitch_path)s") % locals())
+                                            "%(vswitch_path)s") %
+                                          {'port_name': port_name,
+                                           'vswitch_path': vswitch_path})
         return new_port
+
+    def vswitch_port_needed(self):
+        # NOTE(alexpilotti): In WMI V2 the vswitch_path is set in the VM
+        # setting data without the need for a vswitch port.
+        return True

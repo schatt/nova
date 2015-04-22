@@ -15,13 +15,19 @@
 #    License for the specific language governing permissions and limitations
 #    under the License.
 
+# NOTE: XenServer still only supports Python 2.4 in it's dom0 userspace
+# which means the Nova xenapi plugins must use only Python 2.4 features
+
 """
 XenAPI Plugin for transferring data between host nodes
 """
 import utils
 
-from pluginlib_nova import *
-configure_logging('migration')
+import pluginlib_nova
+
+
+pluginlib_nova.configure_logging('migration')
+logging = pluginlib_nova.logging
 
 
 def move_vhds_into_sr(session, instance_uuid, sr_path, uuid_stack):
@@ -33,15 +39,21 @@ def move_vhds_into_sr(session, instance_uuid, sr_path, uuid_stack):
 
 
 def _rsync_vhds(instance_uuid, host, staging_path, user="root"):
-    ssh_cmd = '\"ssh -o StrictHostKeyChecking=no\"'
-
     if not staging_path.endswith('/'):
         staging_path += '/'
 
-    dest_path = '%s@%s:/images/instance%s/' % (user, host, instance_uuid)
+    dest_path = '/images/instance%s/' % (instance_uuid)
 
-    rsync_cmd = "/usr/bin/rsync -av --progress -e %(ssh_cmd)s "\
-        "%(staging_path)s %(dest_path)s" % locals()
+    ip_cmd = ["/sbin/ip", "addr", "show"]
+    output = utils.run_command(ip_cmd)
+    if ' %s/' % host in output:
+        # If copying to localhost, don't use SSH
+        rsync_cmd = ["/usr/bin/rsync", "-av", "--progress",
+                     staging_path, dest_path]
+    else:
+        ssh_cmd = 'ssh -o StrictHostKeyChecking=no'
+        rsync_cmd = ["/usr/bin/rsync", "-av", "--progress", "-e", ssh_cmd,
+                     staging_path, '%s@%s:%s' % (user, host, dest_path)]
 
     # NOTE(hillad): rsync's progress is carriage returned, requiring
     # universal_newlines for real-time output.
@@ -52,7 +64,7 @@ def _rsync_vhds(instance_uuid, host, staging_path, user="root"):
         rsync_progress = rsync_proc.stdout.readline()
         if not rsync_progress:
             break
-        logging.debug(rsync_progress)
+        logging.debug("[%s] %s" % (instance_uuid, rsync_progress))
 
     utils.finish_subprocess(rsync_proc, rsync_cmd)
 

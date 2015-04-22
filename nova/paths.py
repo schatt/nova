@@ -1,5 +1,3 @@
-# vim: tabstop=4 shiftwidth=4 softtabstop=4
-
 # Copyright 2010 United States Government as represented by the
 # Administrator of the National Aeronautics and Space Administration.
 # All Rights Reserved.
@@ -18,8 +16,9 @@
 #    under the License.
 
 import os
+import sys
 
-from oslo.config import cfg
+from oslo_config import cfg
 
 path_opts = [
     cfg.StrOpt('pybasedir',
@@ -27,7 +26,7 @@ path_opts = [
                                                     '../')),
                help='Directory where the nova python module is installed'),
     cfg.StrOpt('bindir',
-               default='$pybasedir/bin',
+               default=os.path.join(sys.prefix, 'local', 'bin'),
                help='Directory where nova binaries are installed'),
     cfg.StrOpt('state_path',
                default='$pybasedir',

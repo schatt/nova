@@ -1,5 +1,3 @@
-# vim: tabstop=4 shiftwidth=4 softtabstop=4
-
 # Copyright 2010-2011 OpenStack Foundation
 # All Rights Reserved.
 #
@@ -17,11 +15,27 @@
 
 import datetime
 
-from nova.openstack.common import timeutils
+from oslo_utils import timeutils
 
 
 class ViewBuilder(object):
     """OpenStack API base limits view builder."""
+
+    limit_names = {}
+
+    def __init__(self):
+        self.limit_names = {
+            "ram": ["maxTotalRAMSize"],
+            "instances": ["maxTotalInstances"],
+            "cores": ["maxTotalCores"],
+            "key_pairs": ["maxTotalKeypairs"],
+            "floating_ips": ["maxTotalFloatingIps"],
+            "metadata_items": ["maxServerMeta", "maxImageMeta"],
+            "injected_files": ["maxPersonality"],
+            "injected_file_content_bytes": ["maxPersonalitySize"],
+            "security_groups": ["maxSecurityGroups"],
+            "security_group_rules": ["maxSecurityGroupRules"],
+    }
 
     def build(self, rate_limits, absolute_limits):
         rate_limits = self._build_rate_limits(rate_limits)
@@ -43,23 +57,11 @@ class ViewBuilder(object):
         For example: {"ram": 512, "gigabytes": 1024}.
 
         """
-        limit_names = {
-            "ram": ["maxTotalRAMSize"],
-            "instances": ["maxTotalInstances"],
-            "cores": ["maxTotalCores"],
-            "key_pairs": ["maxTotalKeypairs"],
-            "floating_ips": ["maxTotalFloatingIps"],
-            "metadata_items": ["maxServerMeta", "maxImageMeta"],
-            "injected_files": ["maxPersonality"],
-            "injected_file_content_bytes": ["maxPersonalitySize"],
-            "security_groups": ["maxSecurityGroups"],
-            "security_group_rules": ["maxSecurityGroupRules"],
-        }
         limits = {}
         for name, value in absolute_limits.iteritems():
-            if name in limit_names and value is not None:
-                for name in limit_names[name]:
-                    limits[name] = value
+            if name in self.limit_names and value is not None:
+                for limit_name in self.limit_names[name]:
+                    limits[limit_name] = value
         return limits
 
     def _build_rate_limits(self, rate_limits):
@@ -71,7 +73,7 @@ class ViewBuilder(object):
             # check for existing key
             for limit in limits:
                 if (limit["uri"] == rate_limit["URI"] and
-                    limit["regex"] == rate_limit["regex"]):
+                        limit["regex"] == rate_limit["regex"]):
                     _rate_limit_key = limit
                     break
 
@@ -98,3 +100,12 @@ class ViewBuilder(object):
             "unit": rate_limit["unit"],
             "next-available": timeutils.isotime(at=next_avail),
         }
+
+
+class ViewBuilderV3(ViewBuilder):
+
+    def __init__(self):
+        super(ViewBuilderV3, self).__init__()
+        # NOTE In v2.0 these are added by a specific extension
+        self.limit_names["server_groups"] = ["maxServerGroups"]
+        self.limit_names["server_group_members"] = ["maxServerGroupMembers"]

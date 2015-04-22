@@ -12,14 +12,17 @@
 #    License for the specific language governing permissions and limitations
 #    under the License.
 
+# NOTE: XenServer still only supports Python 2.4 in it's dom0 userspace
+# which means the Nova xenapi plugins must use only Python 2.4 features
+
 """Various utilities used by XenServer plugins."""
 
 import cPickle as pickle
 import errno
 import logging
 import os
-import shlex
 import shutil
+import signal
 import subprocess
 import tempfile
 
@@ -29,10 +32,14 @@ LOG = logging.getLogger(__name__)
 CHUNK_SIZE = 8192
 
 
+class CommandNotFound(Exception):
+    pass
+
+
 def delete_if_exists(path):
     try:
         os.unlink(path)
-    except OSError, e:
+    except OSError, e:  # noqa
         if e.errno == errno.ENOENT:
             LOG.warning("'%s' was already deleted, skipping delete" % path)
         else:
@@ -46,46 +53,90 @@ def _link(src, dst):
 
 def _rename(src, dst):
     LOG.info("Renaming file '%s' -> '%s'" % (src, dst))
-    os.rename(src, dst)
+    try:
+        os.rename(src, dst)
+    except OSError, e:  # noqa
+        if e.errno == errno.EXDEV:
+            LOG.error("Invalid cross-device link.  Perhaps %s and %s should "
+                      "be symlinked on the same filesystem?" % (src, dst))
+        raise
 
 
 def make_subprocess(cmdline, stdout=False, stderr=False, stdin=False,
-                    universal_newlines=False):
+                    universal_newlines=False, close_fds=True, env=None):
     """Make a subprocess according to the given command-line string
     """
-    # NOTE(dprince): shlex python 2.4 doesn't like unicode so we
-    # explicitly convert to ascii
-    cmdline = cmdline.encode('ascii')
-    LOG.info("Running cmd '%s'" % cmdline)
+    LOG.info("Running cmd '%s'" % " ".join(cmdline))
     kwargs = {}
     kwargs['stdout'] = stdout and subprocess.PIPE or None
     kwargs['stderr'] = stderr and subprocess.PIPE or None
     kwargs['stdin'] = stdin and subprocess.PIPE or None
     kwargs['universal_newlines'] = universal_newlines
-    args = shlex.split(cmdline)
-    LOG.info("Running args '%s'" % args)
-    proc = subprocess.Popen(args, **kwargs)
+    kwargs['close_fds'] = close_fds
+    kwargs['env'] = env
+    try:
+        proc = subprocess.Popen(cmdline, **kwargs)
+    except OSError, e:  # noqa
+        if e.errno == errno.ENOENT:
+            raise CommandNotFound
+        else:
+            raise
     return proc
 
 
-def finish_subprocess(proc, cmdline, ok_exit_codes=None):
+class SubprocessException(Exception):
+    def __init__(self, cmdline, ret, out, err):
+        Exception.__init__(self, "'%s' returned non-zero exit code: "
+                           "retcode=%i, out='%s', stderr='%s'"
+                           % (cmdline, ret, out, err))
+        self.cmdline = cmdline
+        self.ret = ret
+        self.out = out
+        self.err = err
+
+
+def finish_subprocess(proc, cmdline, cmd_input=None, ok_exit_codes=None):
     """Ensure that the process returned a zero exit code indicating success
     """
     if ok_exit_codes is None:
         ok_exit_codes = [0]
+    out, err = proc.communicate(cmd_input)
 
-    out, err = proc.communicate()
     ret = proc.returncode
     if ret not in ok_exit_codes:
-        raise Exception("'%(cmdline)s' returned non-zero exit code: "
-                        "retcode=%(ret)i, out='%(out)s', stderr='%(err)s'"
-                        % locals())
-    return out, err
+        LOG.error("Command '%(cmdline)s' with process id '%(pid)s' expected "
+                  "return code in '%(ok)s' but got '%(rc)s': %(err)s" %
+                  {'cmdline': cmdline, 'pid': proc.pid, 'ok': ok_exit_codes,
+                   'rc': ret, 'err': err})
+        raise SubprocessException(' '.join(cmdline), ret, out, err)
+    return out
+
+
+def run_command(cmd, cmd_input=None, ok_exit_codes=None):
+    """Abstracts out the basics of issuing system commands. If the command
+    returns anything in stderr, an exception is raised with that information.
+    Otherwise, the output from stdout is returned.
+
+    cmd_input is passed to the process on standard input.
+    """
+    proc = make_subprocess(cmd, stdout=True, stderr=True, stdin=True,
+                           close_fds=True)
+    return finish_subprocess(proc, cmd, cmd_input=cmd_input,
+                             ok_exit_codes=ok_exit_codes)
+
+
+def try_kill_process(proc):
+    """Sends the given process the SIGKILL signal."""
+    pid = proc.pid
+    LOG.info("Killing process %s" % pid)
+    try:
+        os.kill(pid, signal.SIGKILL)
+    except Exception:
+        LOG.exception("Failed to kill %s" % pid)
 
 
 def make_staging_area(sr_path):
-    """
-    The staging area is a place where we can temporarily store and
+    """The staging area is a place where we can temporarily store and
     manipulate VHDs. The use of the staging area is different for upload and
     download:
 
@@ -159,36 +210,42 @@ def _assert_vhd_not_hidden(path):
     If this flag is incorrectly set, then when we move the VHD into the SR, it
     will be deleted out from under us.
     """
-    query_cmd = "vhd-util query -n %(path)s -f" % locals()
-    query_proc = make_subprocess(query_cmd, stdout=True, stderr=True)
-    out, err = finish_subprocess(query_proc, query_cmd)
+    query_cmd = ["vhd-util", "query", "-n", path, "-f"]
+    out = run_command(query_cmd)
 
     for line in out.splitlines():
         if line.lower().startswith('hidden'):
             value = line.split(':')[1].strip()
             if value == "1":
                 raise Exception(
-                    "VHD %(path)s is marked as hidden without child" %
-                    locals())
+                    "VHD %s is marked as hidden without child" % path)
+
+
+def _vhd_util_check(vdi_path):
+    check_cmd = ["vhd-util", "check", "-n", vdi_path, "-p"]
+    out = run_command(check_cmd, ok_exit_codes=[0, 22])
+    first_line = out.splitlines()[0].strip()
+    return out, first_line
 
 
 def _validate_vhd(vdi_path):
-    """
-    This checks for several errors in the VHD structure.
+    """This checks for several errors in the VHD structure.
 
     Most notably, it checks that the timestamp in the footer is correct, but
     may pick up other errors also.
 
     This check ensures that the timestamps listed in the VHD footer aren't in
-    the future.  This can occur during a migration if the clocks on the the two
+    the future.  This can occur during a migration if the clocks on the two
     Dom0's are out-of-sync. This would corrupt the SR if it were imported, so
     generate an exception to bail.
     """
-    check_cmd = "vhd-util check -n %(vdi_path)s -p" % locals()
-    check_proc = make_subprocess(check_cmd, stdout=True, stderr=True)
-    out, err = finish_subprocess(
-            check_proc, check_cmd, ok_exit_codes=[0, 22])
-    first_line = out.splitlines()[0].strip()
+    out, first_line = _vhd_util_check(vdi_path)
+
+    if 'invalid' in first_line:
+        LOG.warning("VHD invalid, attempting repair.")
+        repair_cmd = ["vhd-util", "repair", "-n", vdi_path]
+        run_command(repair_cmd)
+        out, first_line = _vhd_util_check(vdi_path)
 
     if 'invalid' in first_line:
         if 'footer' in first_line:
@@ -213,21 +270,21 @@ def _validate_vhd(vdi_path):
 
         raise Exception(
             "VDI '%(vdi_path)s' has an invalid %(part)s: '%(details)s'"
-            "%(extra)s" % locals())
+            "%(extra)s" % {'vdi_path': vdi_path, 'part': part,
+                           'details': details, 'extra': extra})
+
+    LOG.info("VDI is valid: %s" % vdi_path)
 
 
 def _validate_vdi_chain(vdi_path):
-    """
-    This check ensures that the parent pointers on the VHDs are valid
+    """This check ensures that the parent pointers on the VHDs are valid
     before we move the VDI chain to the SR. This is *very* important
     because a bad parent pointer will corrupt the SR causing a cascade of
     failures.
     """
     def get_parent_path(path):
-        query_cmd = "vhd-util query -n %(path)s -p" % locals()
-        query_proc = make_subprocess(query_cmd, stdout=True, stderr=True)
-        out, err = finish_subprocess(
-                query_proc, query_cmd, ok_exit_codes=[0, 22])
+        query_cmd = ["vhd-util", "query", "-n", path, "-p"]
+        out = run_command(query_cmd, ok_exit_codes=[0, 22])
         first_line = out.splitlines()[0].strip()
 
         if first_line.endswith(".vhd"):
@@ -235,11 +292,10 @@ def _validate_vdi_chain(vdi_path):
         elif 'has no parent' in first_line:
             return None
         elif 'query failed' in first_line:
-            raise Exception("VDI '%(path)s' not present which breaks"
-                            " the VDI chain, bailing out" % locals())
+            raise Exception("VDI '%s' not present which breaks"
+                            " the VDI chain, bailing out" % path)
         else:
-            raise Exception("Unexpected output '%(out)s' from vhd-util" %
-                            locals())
+            raise Exception("Unexpected output '%s' from vhd-util" % out)
 
     cur_path = vdi_path
     while cur_path:
@@ -310,10 +366,9 @@ def import_vhds(sr_path, staging_path, uuid_stack):
     for vhd_path in reversed(files_to_move):
         if parent_path:
             # Link to parent
-            modify_cmd = ("vhd-util modify -n %(vhd_path)s"
-                          " -p %(parent_path)s" % locals())
-            modify_proc = make_subprocess(modify_cmd, stderr=True)
-            finish_subprocess(modify_proc, modify_cmd)
+            modify_cmd = ["vhd-util", "modify", "-n", vhd_path,
+                          "-p", parent_path]
+            run_command(modify_cmd)
 
         parent_path = vhd_path
 
@@ -339,27 +394,35 @@ def prepare_staging_area(sr_path, staging_path, vdi_uuids, seq_num=0):
         seq_num += 1
 
 
-def create_tarball(fileobj, path, callback=None):
+def create_tarball(fileobj, path, callback=None, compression_level=None):
     """Create a tarball from a given path.
 
     :param fileobj: a file-like object holding the tarball byte-stream.
                     If None, then only the callback will be used.
     :param path: path to create tarball from
     :param callback: optional callback to call on each chunk written
+    :param compression_level: compression level, e.g., 9 for gzip -9.
     """
-    tar_cmd = "tar -zc --directory=%(path)s ." % locals()
-    tar_proc = make_subprocess(tar_cmd, stdout=True, stderr=True)
+    tar_cmd = ["tar", "-zc", "--directory=%s" % path, "."]
+    env = os.environ.copy()
+    if compression_level and 1 <= compression_level <= 9:
+        env["GZIP"] = "-%d" % compression_level
+    tar_proc = make_subprocess(tar_cmd, stdout=True, stderr=True, env=env)
 
-    while True:
-        chunk = tar_proc.stdout.read(CHUNK_SIZE)
-        if chunk == '':
-            break
+    try:
+        while True:
+            chunk = tar_proc.stdout.read(CHUNK_SIZE)
+            if chunk == '':
+                break
 
-        if callback:
-            callback(chunk)
+            if callback:
+                callback(chunk)
 
-        if fileobj:
-            fileobj.write(chunk)
+            if fileobj:
+                fileobj.write(chunk)
+    except Exception:
+        try_kill_process(tar_proc)
+        raise
 
     finish_subprocess(tar_proc, tar_cmd)
 
@@ -371,18 +434,22 @@ def extract_tarball(fileobj, path, callback=None):
     :param path: path to extract tarball into
     :param callback: optional callback to call on each chunk read
     """
-    tar_cmd = "tar -zx --directory=%(path)s" % locals()
+    tar_cmd = ["tar", "-zx", "--directory=%s" % path]
     tar_proc = make_subprocess(tar_cmd, stderr=True, stdin=True)
 
-    while True:
-        chunk = fileobj.read(CHUNK_SIZE)
-        if chunk == '':
-            break
+    try:
+        while True:
+            chunk = fileobj.read(CHUNK_SIZE)
+            if chunk == '':
+                break
 
-        if callback:
-            callback(chunk)
+            if callback:
+                callback(chunk)
 
-        tar_proc.stdin.write(chunk)
+            tar_proc.stdin.write(chunk)
+    except Exception:
+        try_kill_process(tar_proc)
+        raise
 
     finish_subprocess(tar_proc, tar_cmd)
 

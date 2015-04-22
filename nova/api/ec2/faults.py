@@ -1,5 +1,3 @@
-# vim: tabstop=4 shiftwidth=4 softtabstop=4
-
 #    Licensed under the Apache License, Version 2.0 (the "License"); you may
 #    not use this file except in compliance with the License. You may obtain
 #    a copy of the License at
@@ -12,14 +10,34 @@
 #    License for the specific language governing permissions and limitations
 #    under the License.
 
-from oslo.config import cfg
+from oslo_config import cfg
+from oslo_log import log as logging
 import webob.dec
 import webob.exc
 
+import nova.api.ec2
 from nova import context
 from nova import utils
 
 CONF = cfg.CONF
+LOG = logging.getLogger(__name__)
+
+
+def ec2_error_response(request_id, code, message, status=500):
+    """Helper to construct an EC2 compatible error response."""
+    LOG.debug('EC2 error response: %(code)s: %(message)s',
+              {'code': code, 'message': message})
+    resp = webob.Response()
+    resp.status = status
+    resp.headers['Content-Type'] = 'text/xml'
+    resp.body = str('<?xml version="1.0"?>\n'
+                    '<Response><Errors><Error><Code>%s</Code>'
+                    '<Message>%s</Message></Error></Errors>'
+                    '<RequestID>%s</RequestID></Response>' %
+                    (utils.xhtml_escape(utils.utf8(code)),
+                     utils.xhtml_escape(utils.utf8(message)),
+                     utils.xhtml_escape(utils.utf8(request_id))))
+    return resp
 
 
 class Fault(webob.exc.HTTPException):
@@ -32,12 +50,12 @@ class Fault(webob.exc.HTTPException):
     @webob.dec.wsgify
     def __call__(self, req):
         """Generate a WSGI response based on the exception passed to ctor."""
-        code = self.wrapped_exc.status_int
+        code = nova.api.ec2.exception_to_ec2code(self.wrapped_exc)
+        status = self.wrapped_exc.status_int
         message = self.wrapped_exc.explanation
 
-        if code == 501:
+        if status == 501:
             message = "The requested function is not supported"
-        code = str(code)
 
         if 'AWSAccessKeyId' not in req.params:
             raise webob.exc.HTTPBadRequest()
@@ -50,16 +68,6 @@ class Fault(webob.exc.HTTPException):
         ctxt = context.RequestContext(user_id,
                                       project_id,
                                       remote_address=remote_address)
-
-        resp = webob.Response()
-        resp.status = self.wrapped_exc.status_int
-        resp.headers['Content-Type'] = 'text/xml'
-        resp.body = str('<?xml version="1.0"?>\n'
-                         '<Response><Errors><Error><Code>%s</Code>'
-                         '<Message>%s</Message></Error></Errors>'
-                         '<RequestID>%s</RequestID></Response>' %
-                         (utils.xhtml_escape(utils.utf8(code)),
-                          utils.xhtml_escape(utils.utf8(message)),
-                          utils.xhtml_escape(utils.utf8(ctxt.request_id))))
-
+        resp = ec2_error_response(ctxt.request_id, code,
+                                  message=message, status=status)
         return resp

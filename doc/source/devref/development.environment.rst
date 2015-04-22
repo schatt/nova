@@ -15,44 +15,68 @@
       License for the specific language governing permissions and limitations
       under the License.
 
-Setting Up a Development Environment
-====================================
+==============================================
+Setting Up and Using a Development Environment
+==============================================
 
-This page describes how to setup a working Python development
+This page describes how to setup and use a working Python development
 environment that can be used in developing nova on Ubuntu, Fedora or
-Mac OS X. These instructions assume you're already familiar with
-git.
+Mac OS X. These instructions assume you're already familiar with git.
 
-Following these instructions will allow you to run the nova unit
-tests. If you want to be able to run nova (i.e., launch VM instances),
-you will also need to install libvirt and at least one of the
-`supported hypervisors`_. Running nova is currently only supported on
-Linux, although you can run the unit tests on Mac OS X.
+Following these instructions will allow you to build the documentation
+and run the nova unit tests. If you want to be able to run nova (i.e.,
+launch VM instances), you will also need to --- either manually or by
+letting DevStack do it for you --- install libvirt and at least one of
+the `supported hypervisors`_. Running nova is currently only supported
+on Linux, although you can run the unit tests on Mac OS X.
 
 .. _supported hypervisors: http://wiki.openstack.org/HypervisorSupportMatrix
 
-Virtual environments
---------------------
 
-Nova development uses a set of shell scripts in DevStack. Virtual
-enviroments with venv are also available with the source code.
+Setup
+=====
+
+There are two ways to create a development environment: using
+DevStack, or explicitly installing and cloning just what you need.
+
+
+Using DevStack
+--------------
 
 The easiest way to build a fully functional development environment is
-with DevStack. Create a machine (such as a VM or Vagrant box) running a
-distribution supported by DevStack and install DevStack there. For
-example, there is a Vagrant script for DevStack at https://github.com/jogo/DevstackUp.
+with DevStack. DevStack will hack your machine pretty hard, and so we
+recommend that you create a machine (such as a VM or Vagrant box)
+running a distribution supported by DevStack and run DevStack
+there. For example, there is a Vagrant script for DevStack at
+http://git.openstack.org/cgit/openstack-dev/devstack-vagrant/ .
 
- .. note::
+Include the line
 
-    If you prefer not to use devstack, you can still check out source code on your local
-    machine and develop from there.
+.. code-block:: bash
+
+  INSTALL_TESTONLY_PACKAGES=True
+
+in the ``localrc`` file you use to control DevStack.  This will cause
+DevStack to install what you need for testing and documentation
+building as well as running the system.
+
+Explicit Install/Clone
+----------------------
+
+DevStack installs a complete OpenStack environment.  Alternatively,
+you can explicitly install and clone just what you need for Nova
+development.
+
+The first step of this process is to install the system (not Python)
+packages that are required.  Following are instructions on how to do
+this on Linux and on the Mac.
 
 Linux Systems
--------------
+`````````````
 
 .. note::
 
-  This section is tested for Nova on Ubuntu (10.10-64) and
+  This section is tested for Nova on Ubuntu (14.04-64) and
   Fedora-based (RHEL 6.1) distributions. Feel free to add notes and
   change according to your experiences or operating system.
 
@@ -60,19 +84,28 @@ Install the prerequisite packages.
 
 On Ubuntu::
 
-  sudo apt-get install python-dev libssl-dev python-pip git-core libxml2-dev libxslt-dev
+  sudo apt-get install python-dev libssl-dev python-pip git-core libxml2-dev libxslt-dev pkg-config libffi-dev libpq-dev libmysqlclient-dev libvirt-dev graphviz libsqlite3-dev python-tox
 
 On Ubuntu Precise (12.04) you may also need to add the following packages::
 
   sudo apt-get build-dep python-mysqldb
+  # enable cloud-archive to get the latest libvirt
+  sudo apt-get install python-software-properties
+  sudo add-apt-repository cloud-archive:icehouse
+  sudo apt-get install libvirt-dev
 
 On Fedora-based distributions (e.g., Fedora/RHEL/CentOS/Scientific Linux)::
 
-  sudo yum install python-devel openssl-devel python-pip git gcc libxslt-devel mysql-devel
+  sudo yum install python-devel openssl-devel python-pip git gcc libxslt-devel mysql-devel postgresql-devel libffi-devel libvirt-devel graphviz sqlite-devel
+  sudo pip-python install tox
+
+On openSUSE-based distributions (SLES 12, openSUSE 13.1, Factory or Tumbleweed)::
+
+  sudo zypper in gcc git libffi-devel libmysqlclient-devel libvirt-devel libxslt-devel postgresql-devel python-devel python-pip python-tox python-virtualenv
 
 
 Mac OS X Systems
-----------------
+````````````````
 
 Install virtualenv::
 
@@ -91,63 +124,113 @@ or Mac OS X 10.7 (OpenSSL 0.9.8r) works fine with nova.
 
 
 Getting the code
-----------------
-Grab the code from GitHub::
+````````````````
 
-    git clone https://github.com/openstack/nova.git
+Once you have the prerequisite system packages installed, the next
+step is to clone the code.
+
+Grab the code from git::
+
+    git clone https://git.openstack.org/openstack/nova
     cd nova
 
 
+Building the Documentation
+==========================
+
+To do a full documentation build, issue the following command while
+the nova directory is current.
+
+.. code-block:: bash
+
+  tox -edocs
+
+That will create a Python virtual environment, install the needed
+Python prerequisites in that environment, and build all the
+documentation in that environment.
+
+The following variant will do the first two steps but not build any
+documentation.
+
+.. code-block:: bash
+
+  tox --notest -edocs
+
+The virtual environment built by ``tox`` for documentation building
+will be found in ``.tox/docs``.  You can enter that virtual
+environment in the usual way, as follows.
+
+.. code-block:: bash
+
+  source .tox/docs/bin/activate
+
+To build just the man pages, enter that virtual environment and issue
+the following command while the nova directory is current.
+
+.. code-block:: bash
+
+  python setup.py build_sphinx -b man
+
+After building the man pages, they can be found in ``doc/build/man/``.
+A sufficiently authorized user can install the man page onto the
+system by following steps like the following, which are for the
+``nova-scheduler`` man page.
+
+.. code-block:: bash
+
+  mkdir /usr/local/man/man1
+  install -g 0 -o 0 -m 0644 doc/build/man/nova-scheduler.1  /usr/local/man/man1/nova-scheduler.1
+  gzip /usr/local/man/man1/nova-scheduler.1
+  man nova-scheduler
+
+
 Running unit tests
-------------------
-The unit tests will run by default inside a virtualenv in the ``.venv``
-directory. Run the unit tests by doing::
+==================
 
-    ./run_tests.sh
+See :doc:`unit_tests` for details.
 
-The first time you run them, you will be asked if you want to create a virtual
-environment (hit "y")::
 
-    No virtual environment found...create one? (Y/n)
+Using a remote debugger
+=======================
 
-See :doc:`unit_tests` for more details.
+Some modern IDE such as pycharm (commercial) or Eclipse (open source) support remote debugging.  In order to run nova with remote debugging, start the nova process
+with the following parameters
+--remote_debug-host <host IP where the debugger is running>
+--remote_debug-port <port it is listening on>
 
-.. _virtualenv:
+Before you start your nova process, start the remote debugger using the instructions for that debugger.
+For pycharm - http://blog.jetbrains.com/pycharm/2010/12/python-remote-debug-with-pycharm/
+For Eclipse - http://pydev.org/manual_adv_remote_debugger.html
 
-Manually installing and using the virtualenv
---------------------------------------------
+More detailed instructions are located here - http://novaremotedebug.blogspot.com
 
-You can manually install the virtual environment instead of having
-``run_tests.sh`` do it for you::
+Using fake computes for tests
+=============================
 
-  python tools/install_venv.py
+The number of instances supported by fake computes is not limited by physical
+constraints. It allows you to perform stress tests on a deployment with few
+resources (typically a laptop). But you must avoid using scheduler filters
+limiting the number of instances per compute (like RamFilter, DiskFilter,
+AggregateCoreFilter), otherwise they will limit the number of instances per
+compute.
 
-This will install all of the Python packages listed in the
-``requirements.txt`` file into your virtualenv. There will also be some
-additional packages (pip, distribute, greenlet) that are installed
-by the ``tools/install_venv.py`` file into the virutalenv.
 
-If all goes well, you should get a message something like this::
+Fake computes can also be used in multi hypervisor-type deployments in order to
+take advantage of fake and "real" computes during tests:
 
-  Nova development environment setup is complete.
+* create many fake instances for stress tests
+* create some "real" instances for functional tests
 
-To activate the Nova virtualenv for the extent of your current shell session
-you can run::
-
-     $ source .venv/bin/activate
-
-Or, if you prefer, you can run commands in the virtualenv on a case by case
-basis by running::
-
-     $ tools/with_venv.sh <your command>
+Fake computes can be used for testing Nova itself but also applications on top
+of it.
 
 Contributing Your Work
-----------------------
+======================
 
-Once your work is complete you may wish to contribute it to the project. 
+Once your work is complete you may wish to contribute it to the project.
 Refer to HowToContribute_ for information.
 Nova uses the Gerrit code review system. For information on how to submit
 your branch to Gerrit, see GerritWorkflow_.
 
-.. _GerritWorkflow: http://wiki.openstack.org/GerritWorkflow
-.. _HowToContribute: http://wiki.openstack.org/HowToContribute
+.. _GerritWorkflow: http://docs.openstack.org/infra/manual/developers.html#development-workflow
+.. _HowToContribute: http://docs.openstack.org/infra/manual/developers.html

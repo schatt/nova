@@ -17,26 +17,24 @@
 """vm_vdi_cleaner.py - List or clean orphaned VDIs/instances on XenServer."""
 
 import doctest
-import gettext
 import os
 import sys
 
-from oslo.config import cfg
+from oslo_config import cfg
 import XenAPI
-
-gettext.install('nova', unicode=1)
 
 possible_topdir = os.getcwd()
 if os.path.exists(os.path.join(possible_topdir, "nova", "__init__.py")):
         sys.path.insert(0, possible_topdir)
 
-
+from nova import config
 from nova import context
 from nova import db
 from nova import exception
-from nova.openstack.common import timeutils
+from oslo_utils import timeutils
 from nova.virt import virtapi
 from nova.virt.xenapi import driver as xenapi_driver
+
 
 cleaner_opts = [
     cfg.IntOpt('zombie_instance_updated_at_window',
@@ -45,7 +43,6 @@ cleaner_opts = [
 ]
 
 cli_opt = cfg.StrOpt('command',
-                     default=None,
                      help='Cleaner command')
 
 CONF = cfg.CONF
@@ -73,7 +70,7 @@ def find_orphaned_instances(xenapi):
     for vm_ref, vm_rec in _get_applicable_vm_recs(xenapi):
         try:
             uuid = vm_rec['other_config']['nova_uuid']
-            instance = db.api.instance_get_by_uuid(ctxt, uuid)
+            instance = db.instance_get_by_uuid(ctxt, uuid)
         except (KeyError, exception.InstanceNotFound):
             # NOTE(jk0): Err on the side of caution here. If we don't know
             # anything about the particular instance, ignore it.
@@ -288,6 +285,7 @@ def clean_orphaned_instances(xenapi, orphaned_instances):
 
 def main():
     """Main loop."""
+    config.parse_args(sys.argv)
     args = CONF(args=sys.argv[1:], usage='%(prog)s [options] --command={' +
             '|'.join(ALLOWED_COMMANDS) + '}')
 

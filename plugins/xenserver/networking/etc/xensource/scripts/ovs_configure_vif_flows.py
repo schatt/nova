@@ -1,6 +1,4 @@
 #!/usr/bin/env python
-# vim: tabstop=4 shiftwidth=4 softtabstop=4
-
 # Copyright 2011 OpenStack Foundation
 # All Rights Reserved.
 #
@@ -21,12 +19,13 @@ This script is used to configure openvswitch flows on XenServer hosts.
 """
 
 import os
-import simplejson as json
 import sys
 
 # This is written to Python 2.4, since that is what is available on XenServer
 import netaddr
-import novalib
+import simplejson as json
+
+import novalib  # noqa
 
 
 OVS_OFCTL = '/usr/bin/ovs-ofctl'
@@ -194,7 +193,7 @@ def apply_ovs_ipv6_flows(ovs, bridge, params):
     ovs.add("priority=5,in_port=%(OF_PORT)s,icmp6,icmp_type=135,actions=drop")
     ovs.add("priority=5,in_port=%(OF_PORT)s,icmp6,icmp_type=136,actions=drop")
 
-    # do not allow sending specifc ICMPv6 types
+    # do not allow sending specific ICMPv6 types
     # Router Advertisement
     ovs.add("priority=5,in_port=%(OF_PORT)s,icmp6,icmp_type=134,actions=drop")
     # Redirect Gateway

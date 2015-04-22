@@ -1,5 +1,3 @@
-# vim: tabstop=4 shiftwidth=4 softtabstop=4
-
 # Copyright 2013 Red Hat, Inc.
 #
 #    Licensed under the Apache License, Version 2.0 (the "License"); you may
@@ -18,16 +16,25 @@
 Asynchronous event notifications from virtualization drivers.
 
 This module defines a set of classes representing data for
-various asynchronous events that can occurr in a virtualization
+various asynchronous events that can occur in a virtualization
 driver.
 """
 
 import time
 
+from nova.i18n import _
+
 EVENT_LIFECYCLE_STARTED = 0
 EVENT_LIFECYCLE_STOPPED = 1
 EVENT_LIFECYCLE_PAUSED = 2
 EVENT_LIFECYCLE_RESUMED = 3
+
+NAMES = {
+    EVENT_LIFECYCLE_STARTED: _('Started'),
+    EVENT_LIFECYCLE_STOPPED: _('Stopped'),
+    EVENT_LIFECYCLE_PAUSED: _('Paused'),
+    EVENT_LIFECYCLE_RESUMED: _('Resumed')
+}
 
 
 class Event(object):
@@ -49,6 +56,11 @@ class Event(object):
     def get_timestamp(self):
         return self.timestamp
 
+    def __repr__(self):
+        return "<%s: %s>" % (
+            self.__class__.__name__,
+            self.timestamp)
+
 
 class InstanceEvent(Event):
     """Base class for all instance events.
@@ -56,7 +68,8 @@ class InstanceEvent(Event):
     All events emitted by a virtualization driver which
     are associated with a virtual domain instance are
     subclasses of this base object. This object records
-    the UUID associated with the instance."""
+    the UUID associated with the instance.
+    """
 
     def __init__(self, uuid, timestamp=None):
         super(InstanceEvent, self).__init__(timestamp)
@@ -66,6 +79,12 @@ class InstanceEvent(Event):
     def get_instance_uuid(self):
         return self.uuid
 
+    def __repr__(self):
+        return "<%s: %s, %s>" % (
+            self.__class__.__name__,
+            self.timestamp,
+            self.uuid)
+
 
 class LifecycleEvent(InstanceEvent):
     """Class for instance lifecycle state change events.
@@ -74,7 +93,8 @@ class LifecycleEvent(InstanceEvent):
     events of this class are emitted. The EVENT_LIFECYCLE_XX
     constants defined why lifecycle change occurred. This
     event allows detection of an instance starting/stopping
-    without need for polling"""
+    without need for polling.
+    """
 
     def __init__(self, uuid, transition, timestamp=None):
         super(LifecycleEvent, self).__init__(uuid, timestamp)
@@ -83,3 +103,13 @@ class LifecycleEvent(InstanceEvent):
 
     def get_transition(self):
         return self.transition
+
+    def get_name(self):
+        return NAMES.get(self.transition, _('Unknown'))
+
+    def __repr__(self):
+        return "<%s: %s, %s => %s>" % (
+            self.__class__.__name__,
+            self.timestamp,
+            self.uuid,
+            self.get_name())

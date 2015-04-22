@@ -1,5 +1,3 @@
-# vim: tabstop=4 shiftwidth=4 softtabstop=4
-
 # Copyright 2010 United States Government as represented by the
 # Administrator of the National Aeronautics and Space Administration.
 # Copyright 2011 Piston Cloud Computing, Inc.
@@ -18,20 +16,22 @@
 #    WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the
 #    License for the specific language governing permissions and limitations
 #    under the License.
-#
-# @author: Aaron Rosen, Nicira Networks, Inc.
 
 import urllib
 
-from oslo.config import cfg
+from oslo_config import cfg
 
 from nova import exception
+from nova.i18n import _
 from nova import utils
 
 CONF = cfg.CONF
 
 
 class SecurityGroupBase(object):
+
+    def __init__(self, skip_policy_check=False):
+        self.skip_policy_check = skip_policy_check
 
     def parse_cidr(self, cidr):
         if cidr:
@@ -69,7 +69,7 @@ class SecurityGroupBase(object):
             # specified, but only if a source group was specified.
             ip_proto_upper = ip_protocol.upper() if ip_protocol else ''
             if (ip_proto_upper == 'ICMP' and
-                from_port is None and to_port is None):
+                    from_port is None and to_port is None):
                 from_port = -1
                 to_port = -1
             elif (ip_proto_upper in ['TCP', 'UDP'] and from_port is None
@@ -89,11 +89,11 @@ class SecurityGroupBase(object):
                 to_port = int(to_port)
             except ValueError:
                 if ip_protocol.upper() == 'ICMP':
-                    raise exception.InvalidInput(reason="Type and"
-                         " Code must be integers for ICMP protocol type")
+                    raise exception.InvalidInput(reason=_("Type and"
+                         " Code must be integers for ICMP protocol type"))
                 else:
-                    raise exception.InvalidInput(reason="To and From ports "
-                          "must be integers")
+                    raise exception.InvalidInput(reason=_("To and From ports "
+                          "must be integers"))
 
             if ip_protocol.upper() not in ['TCP', 'UDP', 'ICMP']:
                 raise exception.InvalidIpProtocol(protocol=ip_protocol)
@@ -101,14 +101,14 @@ class SecurityGroupBase(object):
             # Verify that from_port must always be less than
             # or equal to to_port
             if (ip_protocol.upper() in ['TCP', 'UDP'] and
-                (from_port > to_port)):
+                    (from_port > to_port)):
                 raise exception.InvalidPortRange(from_port=from_port,
                       to_port=to_port, msg="Former value cannot"
                                             " be greater than the later")
 
             # Verify valid TCP, UDP port ranges
             if (ip_protocol.upper() in ['TCP', 'UDP'] and
-                (from_port < 1 or to_port > 65535)):
+                    (from_port < 1 or to_port > 65535)):
                 raise exception.InvalidPortRange(from_port=from_port,
                       to_port=to_port, msg="Valid TCP ports should"
                                            " be between 1-65535")
@@ -116,7 +116,7 @@ class SecurityGroupBase(object):
             # Verify ICMP type and code
             if (ip_protocol.upper() == "ICMP" and
                 (from_port < -1 or from_port > 255 or
-                to_port < -1 or to_port > 255)):
+                 to_port < -1 or to_port > 255)):
                 raise exception.InvalidPortRange(from_port=from_port,
                       to_port=to_port, msg="For ICMP, the"
                                            " type:code must be valid")
@@ -146,13 +146,11 @@ class SecurityGroupBase(object):
            defined in the given security group.
         """
         for rule in security_group['rules']:
-            is_duplicate = True
             keys = ('group_id', 'cidr', 'from_port', 'to_port', 'protocol')
             for key in keys:
                 if rule.get(key) != new_rule.get(key):
-                    is_duplicate = False
                     break
-            if is_duplicate:
+            else:
                 return rule.get('id') or True
         return False
 
@@ -179,10 +177,15 @@ class SecurityGroupBase(object):
 
     def populate_security_groups(self, instance, security_groups):
         """Called when populating the database for an instances
-        security groups."""
+        security groups.
+        """
         raise NotImplementedError()
 
     def create_security_group(self, context, name, description):
+        raise NotImplementedError()
+
+    def update_security_group(self, context, security_group,
+                              name, description):
         raise NotImplementedError()
 
     def get(self, context, name=None, id=None, map_exception=False):
@@ -204,36 +207,48 @@ class SecurityGroupBase(object):
     def get_rule(self, context, id):
         raise NotImplementedError()
 
-    def get_instance_security_groups(self, context, instance_id,
-                                     instance_uuid=None, detailed=False):
+    def get_instance_security_groups(self, context, instance_uuid,
+                                     detailed=False):
         raise NotImplementedError()
 
     def add_to_instance(self, context, instance, security_group_name):
+        """Add security group to the instance.
+
+        :param context: The request context.
+        :param instance: nova.objects.instance.Instance object.
+        :param security_group_name: security group name to add
+        """
         raise NotImplementedError()
 
     def remove_from_instance(self, context, instance, security_group_name):
+        """Remove the security group associated with the instance.
+
+        :param context: The request context.
+        :param instance: nova.objects.instance.Instance object.
+        :param security_group_name: security group name to remove
+        """
         raise NotImplementedError()
 
     @staticmethod
     def raise_invalid_property(msg):
-        raise NotImplementedError()
+        raise exception.Invalid(msg)
 
     @staticmethod
     def raise_group_already_exists(msg):
-        raise NotImplementedError()
+        raise exception.Invalid(msg)
 
     @staticmethod
     def raise_invalid_group(msg):
-        raise NotImplementedError()
+        raise exception.Invalid(msg)
 
     @staticmethod
     def raise_invalid_cidr(cidr, decoding_exception=None):
-        raise NotImplementedError()
+        raise exception.InvalidCidr(cidr=cidr)
 
     @staticmethod
     def raise_over_quota(msg):
-        raise NotImplementedError()
+        raise exception.SecurityGroupLimitExceeded(msg)
 
     @staticmethod
     def raise_not_found(msg):
-        raise NotImplementedError()
+        raise exception.SecurityGroupNotFound(msg)

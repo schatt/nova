@@ -1,5 +1,3 @@
-# vim: tabstop=4 shiftwidth=4 softtabstop=4
-
 # Copyright 2010 OpenStack Foundation
 # All Rights Reserved.
 #
@@ -15,52 +13,16 @@
 #    License for the specific language governing permissions and limitations
 #    under the License.
 
+from oslo_utils import strutils
 import webob
 
 from nova.api.openstack import common
 from nova.api.openstack.compute.views import flavors as flavors_view
 from nova.api.openstack import wsgi
-from nova.api.openstack import xmlutil
 from nova.compute import flavors
 from nova import exception
-from nova.openstack.common import strutils
-
-
-def make_flavor(elem, detailed=False):
-    elem.set('name')
-    elem.set('id')
-    if detailed:
-        elem.set('ram')
-        elem.set('disk')
-        elem.set('vcpus', xmlutil.EmptyStringSelector('vcpus'))
-
-    xmlutil.make_links(elem, 'links')
-
-
-flavor_nsmap = {None: xmlutil.XMLNS_V11, 'atom': xmlutil.XMLNS_ATOM}
-
-
-class FlavorTemplate(xmlutil.TemplateBuilder):
-    def construct(self):
-        root = xmlutil.TemplateElement('flavor', selector='flavor')
-        make_flavor(root, detailed=True)
-        return xmlutil.MasterTemplate(root, 1, nsmap=flavor_nsmap)
-
-
-class MinimalFlavorsTemplate(xmlutil.TemplateBuilder):
-    def construct(self):
-        root = xmlutil.TemplateElement('flavors')
-        elem = xmlutil.SubTemplateElement(root, 'flavor', selector='flavors')
-        make_flavor(elem)
-        return xmlutil.MasterTemplate(root, 1, nsmap=flavor_nsmap)
-
-
-class FlavorsTemplate(xmlutil.TemplateBuilder):
-    def construct(self):
-        root = xmlutil.TemplateElement('flavors')
-        elem = xmlutil.SubTemplateElement(root, 'flavor', selector='flavors')
-        make_flavor(elem, detailed=True)
-        return xmlutil.MasterTemplate(root, 1, nsmap=flavor_nsmap)
+from nova.i18n import _
+from nova import utils
 
 
 class Controller(wsgi.Controller):
@@ -68,24 +30,22 @@ class Controller(wsgi.Controller):
 
     _view_builder_class = flavors_view.ViewBuilder
 
-    @wsgi.serializers(xml=MinimalFlavorsTemplate)
     def index(self, req):
         """Return all flavors in brief."""
         limited_flavors = self._get_flavors(req)
         return self._view_builder.index(req, limited_flavors)
 
-    @wsgi.serializers(xml=FlavorsTemplate)
     def detail(self, req):
         """Return all flavors in detail."""
         limited_flavors = self._get_flavors(req)
         req.cache_db_flavors(limited_flavors)
         return self._view_builder.detail(req, limited_flavors)
 
-    @wsgi.serializers(xml=FlavorTemplate)
     def show(self, req, id):
         """Return data about the given flavor id."""
         try:
-            flavor = flavors.get_instance_type_by_flavor_id(id)
+            context = req.environ['nova.context']
+            flavor = flavors.get_flavor_by_flavor_id(id, ctxt=context)
             req.cache_db_flavor(flavor)
         except exception.NotFound:
             raise webob.exc.HTTPNotFound()
@@ -98,7 +58,7 @@ class Controller(wsgi.Controller):
         if is_public is None:
             # preserve default value of showing only public flavors
             return True
-        elif is_public == 'none':
+        elif utils.is_none_string(is_public):
             return None
         else:
             try:
@@ -110,6 +70,9 @@ class Controller(wsgi.Controller):
     def _get_flavors(self, req):
         """Helper function that returns a list of flavor dicts."""
         filters = {}
+        sort_key = req.params.get('sort_key') or 'flavorid'
+        sort_dir = req.params.get('sort_dir') or 'asc'
+        limit, marker = common.get_limit_and_marker(req)
 
         context = req.environ['nova.context']
         if context.is_admin:
@@ -134,11 +97,14 @@ class Controller(wsgi.Controller):
                 msg = _('Invalid minDisk filter [%s]') % req.params['minDisk']
                 raise webob.exc.HTTPBadRequest(explanation=msg)
 
-        limited_flavors = flavors.get_all_types(context, filters=filters)
-        flavors_list = limited_flavors.values()
-        sorted_flavors = sorted(flavors_list,
-                                key=lambda item: item['flavorid'])
-        limited_flavors = common.limited_by_marker(sorted_flavors, req)
+        try:
+            limited_flavors = flavors.get_all_flavors_sorted_list(context,
+                filters=filters, sort_key=sort_key, sort_dir=sort_dir,
+                limit=limit, marker=marker)
+        except exception.MarkerNotFound:
+            msg = _('marker [%s] not found') % marker
+            raise webob.exc.HTTPBadRequest(explanation=msg)
+
         return limited_flavors
 
 

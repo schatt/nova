@@ -1,5 +1,3 @@
-# vim: tabstop=4 shiftwidth=4 softtabstop=4
-
 # Copyright (c) 2012 Rackspace Hosting
 #
 #    Licensed under the Apache License, Version 2.0 (the "License"); you may
@@ -18,7 +16,8 @@
 Global cells config options
 """
 
-from oslo.config import cfg
+from oslo_config import cfg
+
 
 cells_opts = [
     cfg.BoolOpt('enable',
@@ -26,13 +25,13 @@ cells_opts = [
                 help='Enable cell functionality'),
     cfg.StrOpt('topic',
                 default='cells',
-                help='the topic cells nodes listen on'),
+                help='The topic cells nodes listen on'),
     cfg.StrOpt('manager',
                default='nova.cells.manager.CellsManager',
                help='Manager for cells'),
     cfg.StrOpt('name',
                 default='nova',
-                help='name of this cell'),
+                help='Name of this cell'),
     cfg.ListOpt('capabilities',
                 default=['hypervisor=xenserver;kvm', 'os=linux;windows'],
                 help='Key/Multi-value list with the capabilities of the cell'),
@@ -43,6 +42,26 @@ cells_opts = [
                 default=10.0,
                 help='Percentage of cell capacity to hold in reserve. '
                      'Affects both memory and disk utilization'),
+    cfg.StrOpt('cell_type',
+               default='compute',
+               help='Type of cell: api or compute'),
+    cfg.IntOpt("mute_child_interval",
+               default=300,
+               help='Number of seconds after which a lack of capability and '
+                     'capacity updates signals the child cell is to be '
+                     'treated as a mute.'),
+    cfg.IntOpt('bandwidth_update_interval',
+                default=600,
+                help='Seconds between bandwidth updates for cells.'),
 ]
 
-cfg.CONF.register_opts(cells_opts, group='cells')
+CONF = cfg.CONF
+CONF.register_opts(cells_opts, group='cells')
+
+
+def get_cell_type():
+    """Return the cell type, 'api', 'compute', or None (if cells is disabled).
+    """
+    if not CONF.cells.enable:
+        return
+    return CONF.cells.cell_type

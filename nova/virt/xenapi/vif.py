@@ -1,5 +1,3 @@
-# vim: tabstop=4 shiftwidth=4 softtabstop=4
-
 # Copyright (c) 2011 Citrix Systems, Inc.
 # Copyright 2011 OpenStack Foundation
 # Copyright (C) 2011 Nicira, Inc
@@ -19,18 +17,19 @@
 
 """VIF drivers for XenAPI."""
 
-from oslo.config import cfg
+from oslo_config import cfg
 
+from nova.i18n import _
 from nova.virt.xenapi import network_utils
 from nova.virt.xenapi import vm_utils
 
 
-xenapi_ovs_integration_bridge_opt = cfg.StrOpt('xenapi_ovs_integration_bridge',
-        default='xapi1',
-        help='Name of Integration Bridge used by Open vSwitch')
+xenapi_ovs_integration_bridge_opt = cfg.StrOpt('ovs_integration_bridge',
+                        default='xapi1',
+                        help='Name of Integration Bridge used by Open vSwitch')
 
 CONF = cfg.CONF
-CONF.register_opt(xenapi_ovs_integration_bridge_opt)
+CONF.register_opt(xenapi_ovs_integration_bridge_opt, 'xenserver')
 
 
 class XenVIFDriver(object):
@@ -117,10 +116,13 @@ class XenAPIBridgeDriver(XenVIFDriver):
                 pif_vlan = int(pif_rec['VLAN'])
                 # Raise an exception if VLAN != vlan_num
                 if pif_vlan != vlan_num:
-                    raise Exception(_(
-                                "PIF %(pif_rec['uuid'])s for network "
-                                "%(bridge)s has VLAN id %(pif_vlan)d. "
-                                "Expected %(vlan_num)d") % locals())
+                    raise Exception(_("PIF %(pif_uuid)s for network "
+                                      "%(bridge)s has VLAN id %(pif_vlan)d. "
+                                      "Expected %(vlan_num)d"),
+                                    {'pif_uuid': pif_rec['uuid'],
+                                     'bridge': bridge,
+                                     'pif_vlan': pif_vlan,
+                                     'vlan_num': vlan_num})
 
         return network_ref
 
@@ -141,7 +143,7 @@ class XenAPIOpenVswitchDriver(XenVIFDriver):
         # with OVS model, always plug into an OVS integration bridge
         # that is already created
         network_ref = network_utils.find_network_with_bridge(
-                self._session, CONF.xenapi_ovs_integration_bridge)
+                self._session, CONF.xenserver.ovs_integration_bridge)
         vif_rec = {}
         vif_rec['device'] = str(device)
         vif_rec['network'] = network_ref

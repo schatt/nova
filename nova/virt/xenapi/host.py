@@ -1,5 +1,3 @@
-# vim: tabstop=4 shiftwidth=4 softtabstop=4
-
 # Copyright (c) 2012 Citrix Systems, Inc.
 # Copyright 2010 OpenStack Foundation
 #
@@ -19,27 +17,35 @@
 Management class for host-related functions (start, reboot, etc).
 """
 
+import re
+
+from oslo_config import cfg
+from oslo_log import log as logging
+from oslo_serialization import jsonutils
+
+from nova.compute import arch
+from nova.compute import hv_type
 from nova.compute import task_states
+from nova.compute import vm_mode
 from nova.compute import vm_states
 from nova import context
 from nova import exception
-from nova.openstack.common import jsonutils
-from nova.openstack.common import log as logging
+from nova.i18n import _, _LE, _LI, _LW
+from nova import objects
 from nova.virt.xenapi import pool_states
 from nova.virt.xenapi import vm_utils
 
+CONF = cfg.CONF
 LOG = logging.getLogger(__name__)
 
 
 class Host(object):
-    """
-    Implements host related operations.
-    """
+    """Implements host related operations."""
     def __init__(self, session, virtapi):
         self._session = session
         self._virtapi = virtapi
 
-    def host_power_action(self, _host, action):
+    def host_power_action(self, action):
         """Reboots or shuts down the host."""
         args = {"action": jsonutils.dumps(action)}
         methods = {"reboot": "host_reboot", "shutdown": "host_shutdown"}
@@ -48,12 +54,13 @@ class Host(object):
 
     def host_maintenance_mode(self, host, mode):
         """Start/Stop host maintenance window. On start, it triggers
-        guest VMs evacuation."""
+        guest VMs evacuation.
+        """
         if not mode:
             return 'off_maintenance'
         host_list = [host_ref for host_ref in
-                     self._session.call_xenapi('host.get_all')
-                     if host_ref != self._session.get_xenapi_host()]
+                     self._session.host.get_all()
+                     if host_ref != self._session.host_ref]
         migrations_counter = vm_counter = 0
         ctxt = context.get_admin_context()
         for vm_ref, vm_rec in vm_utils.list_vms(self._session):
@@ -63,18 +70,19 @@ class Host(object):
                     uuid = vm_rec['other_config'].get('nova_uuid')
                     if not uuid:
                         name = vm_rec['name_label']
-                        uuid = _uuid_find(self._virtapi, ctxt, host, name)
+                        uuid = _uuid_find(ctxt, host, name)
                         if not uuid:
-                            msg = _('Instance %(name)s running on %(host)s'
-                                    ' could not be found in the database:'
-                                    ' assuming it is a worker VM and skip'
-                                    ' ping migration to a new host')
-                            LOG.info(msg % locals())
+                            LOG.info(_LI('Instance %(name)s running on '
+                                         '%(host)s could not be found in '
+                                         'the database: assuming it is a '
+                                         'worker VM and skip ping migration '
+                                         'to a new host'),
+                                     {'name': name, 'host': host})
                             continue
-                    instance = self._virtapi.instance_get_by_uuid(ctxt, uuid)
+                    instance = objects.Instance.get_by_uuid(ctxt, uuid)
                     vm_counter = vm_counter + 1
 
-                    aggregate = self._virtapi.aggregate_get_by_host(
+                    aggregate = objects.AggregateList.get_by_host(
                         ctxt, host, key=pool_states.POOL_FLAG)
                     if not aggregate:
                         msg = _('Aggregate for host %(host)s count not be'
@@ -83,27 +91,25 @@ class Host(object):
 
                     dest = _host_find(ctxt, self._session, aggregate[0],
                                       host_ref)
-                    self._virtapi.instance_update(
-                        ctxt, instance['uuid'],
-                        {'host': dest,
-                         'task_state': task_states.MIGRATING})
+                    instance.host = dest
+                    instance.task_state = task_states.MIGRATING
+                    instance.save()
 
-                    self._session.call_xenapi('VM.pool_migrate',
-                                              vm_ref, host_ref, {})
+                    self._session.VM.pool_migrate(vm_ref, host_ref,
+                                                  {"live": "true"})
                     migrations_counter = migrations_counter + 1
 
-                    self._virtapi.instance_update(
-                        ctxt, instance['uuid'],
-                        {'vm_state': vm_states.ACTIVE})
+                    instance.vm_state = vm_states.ACTIVE
+                    instance.save()
 
                     break
                 except self._session.XenAPI.Failure:
-                    LOG.exception(_('Unable to migrate VM %(vm_ref)s'
-                                    'from %(host)s') % locals())
-                    self._virtapi.instance_update(
-                        ctxt, instance['uuid'],
-                        {'host': host,
-                         'vm_state': vm_states.ACTIVE})
+                    LOG.exception(_LE('Unable to migrate VM %(vm_ref)s '
+                                      'from %(host)s'),
+                                  {'vm_ref': vm_ref, 'host': host})
+                    instance.host = host
+                    instance.vm_state = vm_states.ACTIVE
+                    instance.save()
 
         if vm_counter == migrations_counter:
             return 'on_maintenance'
@@ -111,13 +117,22 @@ class Host(object):
             raise exception.NoValidHost(reason='Unable to find suitable '
                                                    'host for VMs evacuation')
 
-    def set_host_enabled(self, _host, enabled):
-        """Sets the specified host's ability to accept new instances."""
+    def set_host_enabled(self, enabled):
+        """Sets the compute host's ability to accept new instances."""
+        # Since capabilities are gone, use service table to disable a node
+        # in scheduler
+        cntxt = context.get_admin_context()
+        service = objects.Service.get_by_args(cntxt, CONF.host,
+                                              'nova-compute')
+        service.disabled = not enabled
+        service.disabled_reason = 'set by xenapi host_state'
+        service.save()
+
         args = {"enabled": jsonutils.dumps(enabled)}
         response = call_xenhost(self._session, "set_host_enabled", args)
         return response.get("status", response)
 
-    def get_host_uptime(self, _host):
+    def get_host_uptime(self):
         """Returns the result of calling "uptime" on the target host."""
         response = call_xenhost(self._session, "host_uptime", {})
         return response.get("uptime", response)
@@ -133,11 +148,81 @@ class HostState(object):
         self._stats = {}
         self.update_status()
 
+    def _get_passthrough_devices(self):
+        """Get a list pci devices that are available for pci passthtough.
+
+        We use a plugin to get the output of the lspci command runs on dom0.
+        From this list we will extract pci devices that are using the pciback
+        kernel driver.
+
+        :returns: a list of pci devices on the node
+        """
+        def _compile_hex(pattern):
+            """Return a compiled regular expression pattern into which we have
+            replaced occurrences of hex by [\da-fA-F].
+            """
+            return re.compile(pattern.replace("hex", r"[\da-fA-F]"))
+
+        def _parse_pci_device_string(dev_string):
+            """Exctract information from the device string about the slot, the
+            vendor and the product ID. The string is as follow:
+                "Slot:\tBDF\nClass:\txxxx\nVendor:\txxxx\nDevice:\txxxx\n..."
+            Return a dictionary with informations about the device.
+            """
+            slot_regex = _compile_hex(r"Slot:\t"
+                                      r"((?:hex{4}:)?"  # Domain: (optional)
+                                      r"hex{2}:"        # Bus:
+                                      r"hex{2}\."       # Device.
+                                      r"hex{1})")       # Function
+            vendor_regex = _compile_hex(r"\nVendor:\t(hex+)")
+            product_regex = _compile_hex(r"\nDevice:\t(hex+)")
+
+            slot_id = slot_regex.findall(dev_string)
+            vendor_id = vendor_regex.findall(dev_string)
+            product_id = product_regex.findall(dev_string)
+
+            if not slot_id or not vendor_id or not product_id:
+                raise exception.NovaException(
+                    _("Failed to parse information about"
+                      " a pci device for passthrough"))
+
+            type_pci = self._session.call_plugin_serialized(
+                'xenhost', 'get_pci_type', slot_id[0])
+
+            return {'label': '_'.join(['label',
+                                       vendor_id[0],
+                                       product_id[0]]),
+                    'vendor_id': vendor_id[0],
+                    'product_id': product_id[0],
+                    'address': slot_id[0],
+                    'dev_id': '_'.join(['pci', slot_id[0]]),
+                    'dev_type': type_pci,
+                    'status': 'available'}
+
+        # Devices are separated by a blank line. That is why we
+        # use "\n\n" as separator.
+        lspci_out = self._session.call_plugin_serialized(
+            'xenhost', 'get_pci_device_details')
+        pci_list = lspci_out.split("\n\n")
+
+        # For each device of the list, check if it uses the pciback
+        # kernel driver and if it does, get informations and add it
+        # to the list of passthrough_devices. Ignore it if the driver
+        # is not pciback.
+        passthrough_devices = []
+
+        for dev_string_info in pci_list:
+            if "Driver:\tpciback" in dev_string_info:
+                new_dev = _parse_pci_device_string(dev_string_info)
+                passthrough_devices.append(new_dev)
+
+        return passthrough_devices
+
     def get_host_stats(self, refresh=False):
         """Return the current state of the host. If 'refresh' is
         True, run the update first.
         """
-        if refresh:
+        if refresh or not self._stats:
             self.update_status()
         return self._stats
 
@@ -145,19 +230,22 @@ class HostState(object):
         """Since under Xenserver, a compute node runs on a given host,
         we can get host status information using xenapi.
         """
-        LOG.debug(_("Updating host stats"))
+        LOG.debug("Updating host stats")
         data = call_xenhost(self._session, "host_data", {})
         if data:
-            sr_ref = vm_utils.safe_find_sr(self._session)
-            self._session.call_xenapi("SR.scan", sr_ref)
-            sr_rec = self._session.call_xenapi("SR.get_record", sr_ref)
+            sr_ref = vm_utils.scan_default_sr(self._session)
+            sr_rec = self._session.SR.get_record(sr_ref)
             total = int(sr_rec["physical_size"])
             used = int(sr_rec["physical_utilisation"])
             data["disk_total"] = total
             data["disk_used"] = used
+            data["disk_allocated"] = int(sr_rec["virtual_allocation"])
             data["disk_available"] = total - used
             data["supported_instances"] = to_supported_instances(
                 data.get("host_capabilities")
+            )
+            data["cpu_model"] = to_cpu_model(
+                data.get("host_cpu_info")
             )
             host_memory = data.get('host_memory', None)
             if host_memory:
@@ -167,7 +255,19 @@ class HostState(object):
                 data["host_memory_free_computed"] = host_memory.get(
                                                     'free-computed', 0)
                 del data['host_memory']
+            if (data['host_hostname'] !=
+                    self._stats.get('host_hostname', data['host_hostname'])):
+                LOG.error(_LE('Hostname has changed from %(old)s to %(new)s. '
+                              'A restart is required to take effect.') %
+                          {'old': self._stats['host_hostname'],
+                           'new': data['host_hostname']})
+                data['host_hostname'] = self._stats['host_hostname']
             data['hypervisor_hostname'] = data['host_hostname']
+            vcpus_used = 0
+            for vm_ref, vm_rec in vm_utils.list_vms(self._session):
+                vcpus_used = vcpus_used + int(vm_rec['VCPUs_max'])
+            data['vcpus_used'] = vcpus_used
+            data['pci_passthrough_devices'] = self._get_passthrough_devices()
             self._stats = data
 
 
@@ -178,13 +278,74 @@ def to_supported_instances(host_capabilities):
     result = []
     for capability in host_capabilities:
         try:
-            ostype, _version, arch = capability.split("-")
-            result.append((arch, 'xapi', ostype))
+            # 'capability'is unicode but we want arch/ostype
+            # to be strings to match the standard constants
+            capability = str(capability)
+
+            ostype, _version, guestarch = capability.split("-")
+
+            guestarch = arch.canonicalize(guestarch)
+            ostype = vm_mode.canonicalize(ostype)
+
+            result.append((guestarch, hv_type.XEN, ostype))
         except ValueError:
-            LOG.warning(
-                _("Failed to extract instance support from %s"), capability)
+            LOG.warning(_LW("Failed to extract instance support from %s"),
+                        capability)
 
     return result
+
+
+def to_cpu_model(host_cpu_info):
+    # The XenAPI driver returns data in the format
+    #
+    # {"physical_features": "0098e3fd-bfebfbff-00000001-28100800",
+    #  "modelname": "Intel(R) Xeon(R) CPU           X3430  @ 2.40GHz",
+    #  "vendor": "GenuineIntel",
+    #  "features": "0098e3fd-bfebfbff-00000001-28100800",
+    #  "family": 6,
+    #  "maskable": "full",
+    #  "cpu_count": 4,
+    #  "socket_count": "1",
+    #  "flags": "fpu de tsc msr pae mce cx8 apic sep mtrr mca cmov
+    #            pat clflush acpi mmx fxsr sse sse2 ss ht nx
+    #            constant_tsc nonstop_tsc aperfmperf pni vmx est
+    #            ssse3 sse4_1 sse4_2 popcnt hypervisor ida
+    #            tpr_shadow vnmi flexpriority ept vpid",
+    #  "stepping": 5,
+    #  "model": 30,
+    #  "features_after_reboot": "0098e3fd-bfebfbff-00000001-28100800",
+    #  "speed": "2394.086"}
+
+    if host_cpu_info is None:
+        return None
+
+    cpu_info = dict()
+    # TODO(berrange) the data we're putting in model is not
+    # exactly comparable to what libvirt puts in model. The
+    # libvirt model names are a well defined short string
+    # which is really an aliass for a particular set of
+    # feature flags. The Xen model names are raw printable
+    # strings from the kernel with no specific semantics
+    cpu_info["model"] = host_cpu_info["modelname"]
+    cpu_info["vendor"] = host_cpu_info["vendor"]
+    # TODO(berrange) perhaps we could fill in 'arch' field too
+    # by looking at 'host_capabilities' for the Xen host ?
+
+    topology = dict()
+    topology["sockets"] = int(host_cpu_info["socket_count"])
+    topology["cores"] = (int(host_cpu_info["cpu_count"]) /
+                         int(host_cpu_info["socket_count"]))
+    # TODO(berrange): if 'ht' is present in the 'flags' list
+    # is it possible to infer that the 'cpu_count' is in fact
+    # sockets * cores * threads ? Unclear if 'ht' would remain
+    # visible when threads are disabled in BIOS ?
+    topology["threads"] = 1
+
+    cpu_info["topology"] = topology
+
+    cpu_info["features"] = host_cpu_info["flags"].split(" ")
+
+    return cpu_info
 
 
 def call_xenhost(session, method, arg_dict):
@@ -199,35 +360,35 @@ def call_xenhost(session, method, arg_dict):
             return ''
         return jsonutils.loads(result)
     except ValueError:
-        LOG.exception(_("Unable to get updated status"))
+        LOG.exception(_LE("Unable to get updated status"))
         return None
     except session.XenAPI.Failure as e:
-        LOG.error(_("The call to %(method)s returned "
-                    "an error: %(e)s.") % locals())
+        LOG.error(_LE("The call to %(method)s returned "
+                      "an error: %(e)s."), {'method': method, 'e': e})
         return e.details[1]
 
 
-def _uuid_find(virtapi, context, host, name_label):
+def _uuid_find(context, host, name_label):
     """Return instance uuid by name_label."""
-    for i in virtapi.instance_get_all_by_host(context, host):
+    for i in objects.InstanceList.get_by_host(context, host):
         if i.name == name_label:
-            return i['uuid']
+            return i.uuid
     return None
 
 
-def _host_find(context, session, src_aggregate, dst):
+def _host_find(context, session, src_aggregate, host_ref):
     """Return the host from the xenapi host reference.
 
     :param src_aggregate: the aggregate that the compute host being put in
                           maintenance (source of VMs) belongs to
-    :param dst: the hypervisor host reference (destination of VMs)
+    :param host_ref: the hypervisor host reference (destination of VMs)
 
-    :return: the compute host that manages dst
+    :return: the compute host that manages host_ref
     """
     # NOTE: this would be a lot simpler if nova-compute stored
     # CONF.host in the XenServer host's other-config map.
     # TODO(armando-migliaccio): improve according the note above
-    uuid = session.call_xenapi('host.get_record', dst)['uuid']
+    uuid = session.host.get_uuid(host_ref)
     for compute_host, host_uuid in src_aggregate.metadetails.iteritems():
         if host_uuid == uuid:
             return compute_host

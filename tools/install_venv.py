@@ -1,5 +1,3 @@
-# vim: tabstop=4 shiftwidth=4 softtabstop=4
-
 # Copyright 2010 United States Government as represented by the
 # Administrator of the National Aeronautics and Space Administration.
 # All Rights Reserved.
@@ -18,6 +16,8 @@
 #    WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the
 #    License for the specific language governing permissions and limitations
 #    under the License.
+
+from __future__ import print_function
 
 import os
 import sys
@@ -44,7 +44,7 @@ def print_help(venv, root):
 
     Also, make test will automatically use the virtualenv.
     """
-    print help % (venv, root)
+    print(help % (venv, root))
 
 
 def main(argv):
@@ -67,7 +67,6 @@ def main(argv):
     install.check_dependencies()
     install.create_virtualenv(no_site_packages=options.no_site_packages)
     install.install_dependencies()
-    install.post_process()
     print_help(venv, root)
 
 if __name__ == '__main__':

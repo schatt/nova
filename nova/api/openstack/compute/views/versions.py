@@ -1,5 +1,3 @@
-# vim: tabstop=4 shiftwidth=4 softtabstop=4
-
 # Copyright 2010-2011 OpenStack Foundation
 # All Rights Reserved.
 #
@@ -29,14 +27,12 @@ def get_view_builder(req):
 class ViewBuilder(common.ViewBuilder):
 
     def __init__(self, base_url):
-        """
-        :param base_url: url of the root wsgi application
-        """
+        """:param base_url: url of the root wsgi application."""
         self.base_url = base_url
 
     def build_choices(self, VERSIONS, req):
         version_objs = []
-        for version in VERSIONS:
+        for version in sorted(VERSIONS):
             version = VERSIONS[version]
             version_objs.append({
                 "id": version['id'],
@@ -44,7 +40,7 @@ class ViewBuilder(common.ViewBuilder):
                 "links": [
                     {
                         "rel": "self",
-                        "href": self.generate_href(req.path),
+                        "href": self.generate_href(version['id'], req.path),
                     },
                 ],
                 "media-types": version['media-types'],
@@ -59,6 +55,8 @@ class ViewBuilder(common.ViewBuilder):
             version_objs.append({
                 "id": version['id'],
                 "status": version['status'],
+                "version": version['version'],
+                "min_version": version['min_version'],
                 "updated": version['updated'],
                 "links": self._build_links(version),
             })
@@ -75,7 +73,7 @@ class ViewBuilder(common.ViewBuilder):
 
     def _build_links(self, version_data):
         """Generate a container of links that refer to the provided version."""
-        href = self.generate_href()
+        href = self.generate_href(version_data['id'])
 
         links = [
             {
@@ -86,10 +84,14 @@ class ViewBuilder(common.ViewBuilder):
 
         return links
 
-    def generate_href(self, path=None):
+    def generate_href(self, version, path=None):
         """Create an url that refers to a specific version_number."""
         prefix = self._update_compute_link_prefix(self.base_url)
-        version_number = 'v2'
+        if version.find('v2.1') == 0:
+            version_number = 'v2.1'
+        else:
+            version_number = 'v2'
+
         if path:
             path = path.strip('/')
             return os.path.join(prefix, version_number, path)

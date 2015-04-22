@@ -6,7 +6,7 @@ nova-dhcpbridge
 Handles Lease Database updates from DHCP servers
 --------------------------------------------------
 
-:Author: openstack@lists.launchpad.net
+:Author: openstack@lists.openstack.org
 :Date:   2012-09-27
 :Copyright: OpenStack Foundation
 :Version: 2012.1
@@ -42,9 +42,8 @@ SEE ALSO
 ========
 
 * `OpenStack Nova <http://nova.openstack.org>`__
-* `OpenStack Nova <http://nova.openstack.org>`__
 
 BUGS
 ====
 
-* Nova is sourced in Launchpad so you can view current bugs at `OpenStack Nova <http://nova.openstack.org>`__
+* Nova bugs are managed at Launchpad `Bugs : Nova <https://bugs.launchpad.net/nova>`__

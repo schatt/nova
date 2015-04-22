@@ -1,5 +1,3 @@
-# vim: tabstop=4 shiftwidth=4 softtabstop=4
-
 # Copyright 2012 Red Hat, Inc.
 #
 # Licensed under the Apache License, Version 2.0 (the "License"); you may
@@ -17,8 +15,11 @@
 import os
 import tempfile
 
+from oslo_log import log as logging
+from oslo_utils import excutils
+
 from nova import exception
-from nova.openstack.common import log as logging
+from nova.i18n import _
 from nova import utils
 from nova.virt.disk.mount import loop
 from nova.virt.disk.mount import nbd
@@ -29,8 +30,7 @@ LOG = logging.getLogger(__name__)
 
 class VFSLocalFS(vfs.VFS):
 
-    """
-    os.path.join() with safety check for injected file paths.
+    """os.path.join() with safety check for injected file paths.
 
     Join the supplied path components and make sure that the
     resulting path we are injecting into is within the
@@ -60,51 +60,51 @@ class VFSLocalFS(vfs.VFS):
         self.imgdir = imgdir
         self.mount = None
 
-    def setup(self):
+    def setup(self, mount=True):
         self.imgdir = tempfile.mkdtemp(prefix="openstack-vfs-localfs")
         try:
             if self.imgfmt == "raw":
-                LOG.debug(_("Using LoopMount"))
-                mount = loop.LoopMount(self.imgfile,
-                                       self.imgdir,
-                                       self.partition)
-            else:
-                LOG.debug(_("Using NbdMount"))
-                mount = nbd.NbdMount(self.imgfile,
+                LOG.debug("Using LoopMount")
+                mnt = loop.LoopMount(self.imgfile,
                                      self.imgdir,
                                      self.partition)
-            if not mount.do_mount():
-                raise exception.NovaException(mount.error)
-            self.mount = mount
+            else:
+                LOG.debug("Using NbdMount")
+                mnt = nbd.NbdMount(self.imgfile,
+                                   self.imgdir,
+                                   self.partition)
+            if mount:
+                if not mnt.do_mount():
+                    raise exception.NovaException(mnt.error)
+            self.mount = mnt
         except Exception as e:
-            LOG.debug(_("Failed to mount image %(ex)s)") %
-                      {'ex': str(e)})
-            self.teardown()
-            raise e
+            with excutils.save_and_reraise_exception():
+                LOG.debug("Failed to mount image: %(ex)s", {'ex': e})
+                self.teardown()
 
     def teardown(self):
         try:
             if self.mount:
                 self.mount.do_teardown()
         except Exception as e:
-            LOG.debug(_("Failed to unmount %(imgdir)s: %(ex)s") %
-                      {'imgdir': self.imgdir, 'ex': str(e)})
+            LOG.debug("Failed to unmount %(imgdir)s: %(ex)s",
+                      {'imgdir': self.imgdir, 'ex': e})
         try:
             if self.imgdir:
                 os.rmdir(self.imgdir)
         except Exception as e:
-            LOG.debug(_("Failed to remove %(imgdir)s: %(ex)s") %
-                      {'imgdir': self.imgdir, 'ex': str(e)})
+            LOG.debug("Failed to remove %(imgdir)s: %(ex)s",
+                      {'imgdir': self.imgdir, 'ex': e})
         self.imgdir = None
         self.mount = None
 
     def make_path(self, path):
-        LOG.debug(_("Make directory path=%(path)s") % locals())
+        LOG.debug("Make directory path=%s", path)
         canonpath = self._canonical_path(path)
         utils.execute('mkdir', '-p', canonpath, run_as_root=True)
 
     def append_file(self, path, content):
-        LOG.debug(_("Append file path=%(path)s") % locals())
+        LOG.debug("Append file path=%s", path)
         canonpath = self._canonical_path(path)
 
         args = ["-a", canonpath]
@@ -113,7 +113,7 @@ class VFSLocalFS(vfs.VFS):
         utils.execute('tee', *args, **kwargs)
 
     def replace_file(self, path, content):
-        LOG.debug(_("Replace file path=%(path)s") % locals())
+        LOG.debug("Replace file path=%s", path)
         canonpath = self._canonical_path(path)
 
         args = [canonpath]
@@ -122,13 +122,13 @@ class VFSLocalFS(vfs.VFS):
         utils.execute('tee', *args, **kwargs)
 
     def read_file(self, path):
-        LOG.debug(_("Read file path=%(path)s") % locals())
+        LOG.debug("Read file path=%s", path)
         canonpath = self._canonical_path(path)
 
         return utils.read_file_as_root(canonpath)
 
     def has_file(self, path):
-        LOG.debug(_("Has file path=%(path)s") % locals())
+        LOG.debug("Has file path=%s", path)
         canonpath = self._canonical_path(path)
         exists, _err = utils.trycmd('readlink', '-e',
                                     canonpath,
@@ -136,13 +136,15 @@ class VFSLocalFS(vfs.VFS):
         return exists
 
     def set_permissions(self, path, mode):
-        LOG.debug(_("Set permissions path=%(path)s mode=%(mode)o") % locals())
+        LOG.debug("Set permissions path=%(path)s mode=%(mode)o",
+                  {'path': path, 'mode': mode})
         canonpath = self._canonical_path(path)
         utils.execute('chmod', "%o" % mode, canonpath, run_as_root=True)
 
     def set_ownership(self, path, user, group):
-        LOG.debug(_("Set permissions path=%(path)s "
-                    "user=%(user)s group=%(group)s") % locals())
+        LOG.debug("Set permissions path=%(path)s "
+                  "user=%(user)s group=%(group)s",
+                  {'path': path, 'user': user, 'group': group})
         canonpath = self._canonical_path(path)
         owner = None
         cmd = "chown"
@@ -156,3 +158,12 @@ class VFSLocalFS(vfs.VFS):
 
         if owner is not None:
             utils.execute(cmd, owner, canonpath, run_as_root=True)
+
+    def get_image_fs(self):
+        if self.mount.device or self.mount.get_dev():
+            out, err = utils.execute('blkid', '-o',
+                                     'value', '-s',
+                                     'TYPE', self.mount.device,
+                                     run_as_root=True)
+            return out.strip()
+        return ""

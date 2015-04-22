@@ -8,7 +8,7 @@ Named hooks are added to nova code via a decorator that will lazily load
 plugin code matching the name.  The loading works via setuptools
 `entry points`_.
 
-.. _`entry points`: http://packages.python.org/distribute/pkg_resources.html#entry-points
+.. _`entry points`: http://pythonhosted.org/setuptools/pkg_resources.html#entry-points
 
 What are hooks good for?
 ------------------------
@@ -40,11 +40,11 @@ Adding hook object code
 1. Setup a Python package with a setup.py file.
 2. Add the following to the setup.py setup call::
 
-    entry_points = [
+    entry_points = {
         'nova.hooks': [
-            'resize_hook': your_package.hooks.YourHookClass,
+            'resize_hook=your_package.hooks:YourHookClass',
         ]
-    ]
+    },
 
 3. *YourHookClass* should be an object with *pre* and/or *post* methods::
 

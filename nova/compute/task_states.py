@@ -1,5 +1,3 @@
-# vim: tabstop=4 shiftwidth=4 softtabstop=4
-
 # Copyright 2010 OpenStack Foundation
 # All Rights Reserved.
 #
@@ -33,6 +31,7 @@ SPAWNING = 'spawning'
 
 # possible task states during snapshot()
 IMAGE_SNAPSHOT = 'image_snapshot'
+IMAGE_SNAPSHOT_PENDING = 'image_snapshot_pending'
 IMAGE_PENDING_UPLOAD = 'image_pending_upload'
 IMAGE_UPLOADING = 'image_uploading'
 
@@ -56,7 +55,11 @@ RESIZE_CONFIRMING = 'resize_confirming'
 
 # possible task states during reboot()
 REBOOTING = 'rebooting'
+REBOOT_PENDING = 'reboot_pending'
+REBOOT_STARTED = 'reboot_started'
 REBOOTING_HARD = 'rebooting_hard'
+REBOOT_PENDING_HARD = 'reboot_pending_hard'
+REBOOT_STARTED_HARD = 'reboot_started_hard'
 
 # possible task states during pause()
 PAUSING = 'pausing'
@@ -69,14 +72,6 @@ SUSPENDING = 'suspending'
 
 # possible task states during resume()
 RESUMING = 'resuming'
-
-# NOTE(johannes): STOPPING and STARTING need to stick around for the
-# grizzly release for compatibility, but can be removed afterwards.
-# possible task states during stop()
-STOPPING = 'stopping'
-
-# possible task states during start()
-STARTING = 'starting'
 
 # possible task states during power_off()
 POWERING_OFF = 'powering-off'
@@ -106,3 +101,14 @@ SOFT_DELETING = 'soft-deleting'
 
 # possible task states during restore()
 RESTORING = 'restoring'
+
+# possible task states during shelve()
+SHELVING = 'shelving'
+SHELVING_IMAGE_PENDING_UPLOAD = 'shelving_image_pending_upload'
+SHELVING_IMAGE_UPLOADING = 'shelving_image_uploading'
+
+# possible task states during shelve_offload()
+SHELVING_OFFLOADING = 'shelving_offloading'
+
+# possible task states during unshelve()
+UNSHELVING = 'unshelving'

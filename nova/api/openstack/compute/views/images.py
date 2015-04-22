@@ -1,6 +1,5 @@
-# vim: tabstop=4 shiftwidth=4 softtabstop=4
-
 # Copyright 2010-2011 OpenStack Foundation
+# Copyright 2013 IBM Corp.
 # All Rights Reserved.
 #
 #    Licensed under the Apache License, Version 2.0 (the "License"); you may
@@ -15,7 +14,7 @@
 #    License for the specific language governing permissions and limitations
 #    under the License.
 
-import os.path
+from oslo_utils import timeutils
 
 from nova.api.openstack import common
 from nova.image import glance
@@ -77,19 +76,28 @@ class ViewBuilder(common.ViewBuilder):
     def detail(self, request, images):
         """Show a list of images with details."""
         list_func = self.show
-        return self._list_view(list_func, request, images)
+        coll_name = self._collection_name + '/detail'
+        return self._list_view(list_func, request, images, coll_name)
 
     def index(self, request, images):
         """Show a list of images with basic attributes."""
         list_func = self.basic
-        return self._list_view(list_func, request, images)
+        coll_name = self._collection_name
+        return self._list_view(list_func, request, images, coll_name)
 
-    def _list_view(self, list_func, request, images):
-        """Provide a view for a list of images."""
+    def _list_view(self, list_func, request, images, coll_name):
+        """Provide a view for a list of images.
+
+        :param list_func: Function used to format the image data
+        :param request: API request
+        :param images: List of images in dictionary format
+        :param coll_name: Name of collection, used to generate the next link
+                          for a pagination query
+
+        :returns: Image reply data in dictionary format
+        """
         image_list = [list_func(request, image)["image"] for image in images]
-        images_links = self._get_collection_links(request,
-                                                  images,
-                                                  self._collection_name)
+        images_links = self._get_collection_links(request, images, coll_name)
         images_dict = dict(images=image_list)
 
         if images_links:
@@ -119,16 +127,15 @@ class ViewBuilder(common.ViewBuilder):
         """Create an alternate link for a specific image id."""
         glance_url = glance.generate_glance_url()
         glance_url = self._update_glance_link_prefix(glance_url)
-        return os.path.join(glance_url,
-                            request.environ["nova.context"].project_id,
-                            self._collection_name,
-                            str(identifier))
+        return '/'.join([glance_url,
+                         self._collection_name,
+                         str(identifier)])
 
     @staticmethod
-    def _format_date(date_string):
-        """Return standard format for given date."""
-        if date_string is not None:
-            return date_string.strftime('%Y-%m-%dT%H:%M:%SZ')
+    def _format_date(dt):
+        """Return standard format for a given datetime object."""
+        if dt is not None:
+            return timeutils.isotime(dt)
 
     @staticmethod
     def _get_status(image):

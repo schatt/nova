@@ -1,5 +1,3 @@
-# vim: tabstop=4 shiftwidth=4 softtabstop=4
-
 # Copyright (c) 2011 OpenStack Foundation
 # All Rights Reserved.
 #
@@ -23,14 +21,15 @@ dynamic configuration.
 """
 
 import datetime
-import json
 import os
 
-from oslo.config import cfg
+from oslo_config import cfg
+from oslo_log import log as logging
+from oslo_serialization import jsonutils
+from oslo_utils import excutils
+from oslo_utils import timeutils
 
-from nova.openstack.common import excutils
-from nova.openstack.common import log as logging
-from nova.openstack.common import timeutils
+from nova.i18n import _LE
 
 
 scheduler_json_config_location_opt = cfg.StrOpt(
@@ -45,8 +44,7 @@ LOG = logging.getLogger(__name__)
 
 
 class SchedulerOptions(object):
-    """
-    SchedulerOptions monitors a local .json file for changes and loads it
+    """SchedulerOptions monitors a local .json file for changes and loads it
     if needed. This file is converted to a data structure and passed into
     the filtering and weighing functions which can use it for dynamic
     configuration.
@@ -66,18 +64,18 @@ class SchedulerOptions(object):
         """Get the last modified datetime. Broken out for testing."""
         try:
             return os.path.getmtime(filename)
-        except os.error, e:
+        except os.error:
             with excutils.save_and_reraise_exception():
-                LOG.exception(_("Could not stat scheduler options file "
-                                "%(filename)s: '%(e)s'"), locals())
+                LOG.exception(_LE("Could not stat scheduler options file "
+                                  "%(filename)s"),
+                              {'filename': filename})
 
     def _load_file(self, handle):
         """Decode the JSON file. Broken out for testing."""
         try:
-            return json.load(handle)
-        except ValueError, e:
-            LOG.exception(_("Could not decode scheduler options: "
-                            "'%(e)s'") % locals())
+            return jsonutils.load(handle)
+        except ValueError:
+            LOG.exception(_LE("Could not decode scheduler options"))
             return {}
 
     def _get_time_now(self):
@@ -97,7 +95,7 @@ class SchedulerOptions(object):
 
         last_modified = self._get_file_timestamp(filename)
         if (not last_modified or not self.last_modified or
-            last_modified > self.last_modified):
+                last_modified > self.last_modified):
             self.data = self._load_file(self._get_file_handle(filename))
             self.last_modified = last_modified
         if not self.data:

@@ -1,5 +1,3 @@
-# vim: tabstop=4 shiftwidth=4 softtabstop=4
-
 # Copyright 2011 United States Government as represented by the
 # Administrator of the National Aeronautics and Space Administration.
 # All Rights Reserved.
@@ -17,14 +15,15 @@
 #    License for the specific language governing permissions and limitations
 #    under the License.
 
-from oslo.config import cfg
+from oslo_config import cfg
+from oslo_log import log as logging
+from oslo_utils import importutils
 
-from nova import conductor
+from nova.compute import utils as compute_utils
 from nova import context
-from nova import network
+from nova.i18n import _LI
 from nova.network import linux_net
-from nova.openstack.common import importutils
-from nova.openstack.common import log as logging
+from nova import objects
 from nova import utils
 from nova.virt import netutils
 
@@ -32,7 +31,6 @@ LOG = logging.getLogger(__name__)
 
 firewall_opts = [
     cfg.StrOpt('firewall_driver',
-               default=None,
                help='Firewall driver '
                     '(defaults to hypervisor specific iptables driver)'),
     cfg.BoolOpt('allow_same_net_traffic',
@@ -61,7 +59,9 @@ class FirewallDriver(object):
 
     def prepare_instance_filter(self, instance, network_info):
         """Prepare filters for the instance.
-        At this point, the instance isn't running yet."""
+
+        At this point, the instance isn't running yet.
+        """
         raise NotImplementedError()
 
     def filter_defer_apply_on(self):
@@ -90,14 +90,16 @@ class FirewallDriver(object):
         """Refresh security group rules from data store
 
         Gets called when a rule has been added to or removed from
-        the security group."""
+        the security group.
+        """
         raise NotImplementedError()
 
     def refresh_security_group_members(self, security_group_id):
         """Refresh security group members from data store
 
         Gets called when an instance gets added to or removed from
-        the security group."""
+        the security group.
+        """
         raise NotImplementedError()
 
     def refresh_instance_security_rules(self, instance):
@@ -105,7 +107,8 @@ class FirewallDriver(object):
 
         Gets called when an instance gets added to or removed from
         the security group the instance is a member of or if the
-        group gains or looses a rule."""
+        group gains or looses a rule.
+        """
         raise NotImplementedError()
 
     def refresh_provider_fw_rules(self):
@@ -130,14 +133,6 @@ class FirewallDriver(object):
         """Check nova-instance-instance-xxx exists."""
         raise NotImplementedError()
 
-    def _handle_network_info_model(self, network_info):
-        # make sure this is legacy network_info
-        try:
-            return network_info.legacy()
-        except AttributeError:
-            # no "legacy" function means network_info is legacy
-            return network_info
-
 
 class IptablesFirewallDriver(FirewallDriver):
     """Driver which enforces security groups through iptables rules."""
@@ -145,8 +140,7 @@ class IptablesFirewallDriver(FirewallDriver):
     def __init__(self, virtapi, **kwargs):
         super(IptablesFirewallDriver, self).__init__(virtapi)
         self.iptables = linux_net.iptables_manager
-        self.instances = {}
-        self.network_infos = {}
+        self.instance_info = {}
         self.basically_filtered = False
 
         # Flags for DHCP request rule
@@ -172,29 +166,23 @@ class IptablesFirewallDriver(FirewallDriver):
         self.iptables.defer_apply_off()
 
     def unfilter_instance(self, instance, network_info):
-        # make sure this is legacy nw_info
-        network_info = self._handle_network_info_model(network_info)
-
-        if self.instances.pop(instance['id'], None):
-            # NOTE(vish): use the passed info instead of the stored info
-            self.network_infos.pop(instance['id'])
+        if self.instance_info.pop(instance.id, None):
             self.remove_filters_for_instance(instance)
             self.iptables.apply()
         else:
-            LOG.info(_('Attempted to unfilter instance which is not '
-                     'filtered'), instance=instance)
+            LOG.info(_LI('Attempted to unfilter instance which is not '
+                         'filtered'), instance=instance)
 
     def prepare_instance_filter(self, instance, network_info):
-        # make sure this is legacy nw_info
-        network_info = self._handle_network_info_model(network_info)
-
-        self.instances[instance['id']] = instance
-        self.network_infos[instance['id']] = network_info
+        self.instance_info[instance.id] = (instance, network_info)
         ipv4_rules, ipv6_rules = self.instance_rules(instance, network_info)
-        self.add_filters_for_instance(instance, ipv4_rules, ipv6_rules)
-        LOG.debug(_('Filters added to instance'), instance=instance)
+        self.add_filters_for_instance(instance, network_info, ipv4_rules,
+                                      ipv6_rules)
+        LOG.debug('Filters added to instance: %s', instance.id,
+                  instance=instance)
         self.refresh_provider_fw_rules()
-        LOG.debug(_('Provider Firewall Rules refreshed'), instance=instance)
+        LOG.debug('Provider Firewall Rules refreshed: %s', instance.id,
+                  instance=instance)
         # Ensure that DHCP request rule is updated if necessary
         if (self.dhcp_create and not self.dhcp_created):
             self.iptables.ipv4['filter'].add_rule(
@@ -211,21 +199,31 @@ class IptablesFirewallDriver(FirewallDriver):
     def _create_filter(self, ips, chain_name):
         return ['-d %s -j $%s' % (ip, chain_name) for ip in ips]
 
+    def _get_subnets(self, network_info, version):
+        subnets = []
+        for vif in network_info:
+            if 'network' in vif and 'subnets' in vif['network']:
+                for subnet in vif['network']['subnets']:
+                    if subnet['version'] == version:
+                        subnets.append(subnet)
+        return subnets
+
     def _filters_for_instance(self, chain_name, network_info):
         """Creates a rule corresponding to each ip that defines a
-             jump to the corresponding instance - chain for all the traffic
-             destined to that ip."""
-        # make sure this is legacy nw_info
-        network_info = self._handle_network_info_model(network_info)
-
-        ips_v4 = [ip['ip'] for (_n, mapping) in network_info
-                 for ip in mapping['ips']]
+           jump to the corresponding instance - chain for all the traffic
+           destined to that ip.
+        """
+        v4_subnets = self._get_subnets(network_info, 4)
+        v6_subnets = self._get_subnets(network_info, 6)
+        ips_v4 = [ip['address'] for subnet in v4_subnets
+                                for ip in subnet['ips']]
         ipv4_rules = self._create_filter(ips_v4, chain_name)
 
-        ipv6_rules = []
+        ipv6_rules = ips_v6 = []
         if CONF.use_ipv6:
-            ips_v6 = [ip['ip'] for (_n, mapping) in network_info
-                     for ip in mapping['ip6s']]
+            if v6_subnets:
+                ips_v6 = [ip['address'] for subnet in v6_subnets
+                                        for ip in subnet['ips']]
             ipv6_rules = self._create_filter(ips_v6, chain_name)
 
         return ipv4_rules, ipv6_rules
@@ -238,9 +236,8 @@ class IptablesFirewallDriver(FirewallDriver):
             for rule in ipv6_rules:
                 self.iptables.ipv6['filter'].add_rule(chain_name, rule)
 
-    def add_filters_for_instance(self, instance, inst_ipv4_rules,
+    def add_filters_for_instance(self, instance, network_info, inst_ipv4_rules,
                                  inst_ipv6_rules):
-        network_info = self.network_infos[instance['id']]
         chain_name = self._instance_chain_name(instance)
         if CONF.use_ipv6:
             self.iptables.ipv6['filter'].add_chain(chain_name)
@@ -257,12 +254,8 @@ class IptablesFirewallDriver(FirewallDriver):
         if CONF.use_ipv6:
             self.iptables.ipv6['filter'].remove_chain(chain_name)
 
-    @staticmethod
-    def _security_group_chain_name(security_group_id):
-        return 'nova-sg-%s' % (security_group_id,)
-
     def _instance_chain_name(self, instance):
-        return 'inst-%s' % (instance['id'],)
+        return 'inst-%s' % (instance.id,)
 
     def _do_basic_rules(self, ipv4_rules, ipv6_rules, network_info):
         # Always drop invalid packets
@@ -278,10 +271,9 @@ class IptablesFirewallDriver(FirewallDriver):
         ipv6_rules += ['-j $provider']
 
     def _do_dhcp_rules(self, ipv4_rules, network_info):
-        # make sure this is legacy nw_info
-        network_info = self._handle_network_info_model(network_info)
-
-        dhcp_servers = [info['dhcp_server'] for (_n, info) in network_info]
+        v4_subnets = self._get_subnets(network_info, 4)
+        dhcp_servers = [subnet.get_meta('dhcp_server')
+            for subnet in v4_subnets if subnet.get_meta('dhcp_server')]
 
         for dhcp_server in dhcp_servers:
             if dhcp_server:
@@ -290,25 +282,20 @@ class IptablesFirewallDriver(FirewallDriver):
                 self.dhcp_create = True
 
     def _do_project_network_rules(self, ipv4_rules, ipv6_rules, network_info):
-        # make sure this is legacy nw_info
-        network_info = self._handle_network_info_model(network_info)
-
-        cidrs = [network['cidr'] for (network, _i) in network_info]
+        v4_subnets = self._get_subnets(network_info, 4)
+        v6_subnets = self._get_subnets(network_info, 6)
+        cidrs = [subnet['cidr'] for subnet in v4_subnets]
         for cidr in cidrs:
             ipv4_rules.append('-s %s -j ACCEPT' % (cidr,))
         if CONF.use_ipv6:
-            cidrv6s = [network['cidr_v6'] for (network, _i) in
-                       network_info]
-
+            cidrv6s = [subnet['cidr'] for subnet in v6_subnets]
             for cidrv6 in cidrv6s:
                 ipv6_rules.append('-s %s -j ACCEPT' % (cidrv6,))
 
     def _do_ra_rules(self, ipv6_rules, network_info):
-        # make sure this is legacy nw_info
-        network_info = self._handle_network_info_model(network_info)
+        v6_subnets = self._get_subnets(network_info, 6)
+        gateways_v6 = [subnet['gateway']['address'] for subnet in v6_subnets]
 
-        gateways_v6 = [mapping['gateway_v6'] for (_n, mapping) in
-                       network_info]
         for gateway_v6 in gateways_v6:
             ipv6_rules.append(
                     '-s %s/128 -p icmpv6 -j ACCEPT' % (gateway_v6,))
@@ -341,10 +328,12 @@ class IptablesFirewallDriver(FirewallDriver):
                                            rule['to_port'])]
 
     def instance_rules(self, instance, network_info):
-        # make sure this is legacy nw_info
-        network_info = self._handle_network_info_model(network_info)
-
         ctxt = context.get_admin_context()
+        if isinstance(instance, dict):
+            # NOTE(danms): allow old-world instance objects from
+            # unconverted callers; all we need is instance.uuid below
+            instance = objects.Instance._from_db_object(
+                ctxt, objects.Instance(), instance, [])
 
         ipv4_rules = []
         ipv6_rules = []
@@ -354,7 +343,7 @@ class IptablesFirewallDriver(FirewallDriver):
         # Set up rules to allow traffic to/from DHCP server
         self._do_dhcp_rules(ipv4_rules, network_info)
 
-        #Allow project network traffic
+        # Allow project network traffic
         if CONF.allow_same_net_traffic:
             self._do_project_network_rules(ipv4_rules, ipv6_rules,
                                            network_info)
@@ -365,18 +354,15 @@ class IptablesFirewallDriver(FirewallDriver):
             # Allow RA responses
             self._do_ra_rules(ipv6_rules, network_info)
 
-        security_groups = self._virtapi.security_group_get_by_instance(
+        security_groups = objects.SecurityGroupList.get_by_instance(
             ctxt, instance)
 
         # then, security group chains and rules
         for security_group in security_groups:
-            rules = self._virtapi.security_group_rule_get_by_security_group(
-                ctxt, security_group)
+            rules = objects.SecurityGroupRuleList.get_by_security_group(
+                    ctxt, security_group)
 
             for rule in rules:
-                LOG.debug(_('Adding security group rule: %r'), rule,
-                          instance=instance)
-
                 if not rule['cidr']:
                     version = 4
                 else:
@@ -404,23 +390,19 @@ class IptablesFirewallDriver(FirewallDriver):
                 elif protocol == 'icmp':
                     args += self._build_icmp_rule(rule, version)
                 if rule['cidr']:
-                    LOG.debug('Using cidr %r', rule['cidr'], instance=instance)
-                    args += ['-s', rule['cidr']]
+                    args += ['-s', str(rule['cidr'])]
                     fw_rules += [' '.join(args)]
                 else:
                     if rule['grantee_group']:
-                        # FIXME(jkoelker) This needs to be ported up into
-                        #                 the compute manager which already
-                        #                 has access to a nw_api handle,
-                        #                 and should be the only one making
-                        #                 making rpc calls.
-                        nw_api = network.API()
-                        capi = conductor.API()
-                        for instance in rule['grantee_group']['instances']:
-                            nw_info = nw_api.get_instance_nw_info(
-                                ctxt,
-                                instance,
-                                conductor_api=capi)
+                        insts = (
+                            objects.InstanceList.get_by_security_group(
+                                ctxt, rule['grantee_group']))
+                        for instance in insts:
+                            if instance.info_cache['deleted']:
+                                LOG.debug('ignoring deleted cache')
+                                continue
+                            nw_info = compute_utils.get_nw_info_for_instance(
+                                    instance)
 
                             ips = [ip['address']
                                 for ip in nw_info.fixed_ips()
@@ -431,11 +413,10 @@ class IptablesFirewallDriver(FirewallDriver):
                                 subrule = args + ['-s %s' % ip]
                                 fw_rules += [' '.join(subrule)]
 
-                LOG.debug('Using fw_rules: %r', fw_rules, instance=instance)
-
         ipv4_rules += ['-j $sg-fallback']
         ipv6_rules += ['-j $sg-fallback']
-
+        LOG.debug('Security Groups %s translated to ipv4: %r, ipv6: %r',
+            security_groups, ipv4_rules, ipv6_rules, instance=instance)
         return ipv4_rules, ipv6_rules
 
     def instance_filter_exists(self, instance, network_info):
@@ -454,22 +435,38 @@ class IptablesFirewallDriver(FirewallDriver):
         self.iptables.apply()
 
     @utils.synchronized('iptables', external=True)
-    def _inner_do_refresh_rules(self, instance, ipv4_rules,
-                                               ipv6_rules):
+    def _inner_do_refresh_rules(self, instance, network_info, ipv4_rules,
+                                ipv6_rules):
+        chain_name = self._instance_chain_name(instance)
+        if not self.iptables.ipv4['filter'].has_chain(chain_name):
+            LOG.info(
+                _LI('instance chain %s disappeared during refresh, '
+                    'skipping') % chain_name,
+                instance=instance)
+            return
         self.remove_filters_for_instance(instance)
-        self.add_filters_for_instance(instance, ipv4_rules, ipv6_rules)
+        self.add_filters_for_instance(instance, network_info, ipv4_rules,
+                                      ipv6_rules)
 
     def do_refresh_security_group_rules(self, security_group):
-        for instance in self.instances.values():
-            network_info = self.network_infos[instance['id']]
+        id_list = self.instance_info.keys()
+        for instance_id in id_list:
+            try:
+                instance, network_info = self.instance_info[instance_id]
+            except KeyError:
+                # NOTE(danms): instance cache must have been modified,
+                # ignore this deleted instance and move on
+                continue
             ipv4_rules, ipv6_rules = self.instance_rules(instance,
                                                          network_info)
-            self._inner_do_refresh_rules(instance, ipv4_rules, ipv6_rules)
+            self._inner_do_refresh_rules(instance, network_info, ipv4_rules,
+                                         ipv6_rules)
 
     def do_refresh_instance_rules(self, instance):
-        network_info = self.network_infos[instance['id']]
+        _instance, network_info = self.instance_info[instance.id]
         ipv4_rules, ipv6_rules = self.instance_rules(instance, network_info)
-        self._inner_do_refresh_rules(instance, ipv4_rules, ipv6_rules)
+        self._inner_do_refresh_rules(instance, network_info, ipv4_rules,
+                                     ipv6_rules)
 
     def refresh_provider_fw_rules(self):
         """See :class:`FirewallDriver` docs."""
@@ -508,7 +505,7 @@ class IptablesFirewallDriver(FirewallDriver):
         ipv6_rules = []
         rules = self._virtapi.provider_fw_rule_get_all(ctxt)
         for rule in rules:
-            LOG.debug(_('Adding provider rule: %s'), rule['cidr'])
+            LOG.debug('Adding provider rule: %s', rule['cidr'])
             version = netutils.get_ip_version(rule['cidr'])
             if version == 4:
                 fw_rules = ipv4_rules

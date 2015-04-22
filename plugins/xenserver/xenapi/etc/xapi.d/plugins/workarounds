@@ -15,6 +15,9 @@
 #    License for the specific language governing permissions and limitations
 #    under the License.
 
+# NOTE: XenServer still only supports Python 2.4 in it's dom0 userspace
+# which means the Nova xenapi plugins must use only Python 2.4 features
+
 """Handle the uploading and downloading of images via Glance."""
 
 import os
@@ -22,9 +25,10 @@ import shutil
 
 import utils
 
-#FIXME(sirp): should this use pluginlib from 5.6?
-from pluginlib_nova import *
-configure_logging('workarounds')
+import pluginlib_nova
+
+
+pluginlib_nova.configure_logging('workarounds')
 
 
 def _copy_vdis(sr_path, staging_path, vdi_uuids):

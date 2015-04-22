@@ -1,5 +1,3 @@
-# vim: tabstop=4 shiftwidth=4 softtabstop=4
-
 # Copyright 2010 United States Government as represented by the
 # Administrator of the National Aeronautics and Space Administration.
 # All Rights Reserved.
@@ -26,15 +24,16 @@ import os
 import string
 import zipfile
 
-from oslo.config import cfg
+from oslo_config import cfg
+from oslo_log import log as logging
 
 from nova import compute
 from nova.compute import flavors
 from nova import crypto
 from nova import db
 from nova import exception
+from nova.i18n import _
 from nova.openstack.common import fileutils
-from nova.openstack.common import log as logging
 from nova import paths
 from nova import utils
 
@@ -42,10 +41,10 @@ from nova import utils
 cloudpipe_opts = [
     cfg.StrOpt('vpn_image_id',
                default='0',
-               help='image id used when starting up a cloudpipe vpn server'),
-    cfg.StrOpt('vpn_instance_type',
+               help='Image ID used when starting up a cloudpipe vpn server'),
+    cfg.StrOpt('vpn_flavor',
                default='m1.tiny',
-               help=_('Instance type for vpn instances')),
+               help=_('Flavor for vpn instances')),
     cfg.StrOpt('boot_script_template',
                default=paths.basedir_def('nova/cloudpipe/bootscript.template'),
                help=_('Template for cloudpipe instance boot script')),
@@ -62,6 +61,7 @@ cloudpipe_opts = [
 
 CONF = cfg.CONF
 CONF.register_opts(cloudpipe_opts)
+CONF.import_opt('keys_path', 'nova.crypto')
 
 LOG = logging.getLogger(__name__)
 
@@ -89,8 +89,8 @@ def _load_boot_script():
 
 
 class CloudPipe(object):
-    def __init__(self):
-        self.compute_api = compute.API()
+    def __init__(self, skip_policy_check=False):
+        self.compute_api = compute.API(skip_policy_check=skip_policy_check)
 
     def get_encoded_zip(self, project_id):
         # Make a payload.zip
@@ -123,15 +123,14 @@ class CloudPipe(object):
         return encoded
 
     def launch_vpn_instance(self, context):
-        LOG.debug(_("Launching VPN for %s") % (context.project_id))
+        LOG.debug("Launching VPN for %s", context.project_id)
         key_name = self.setup_key_pair(context)
         group_name = self.setup_security_group(context)
-        instance_type = flavors.get_instance_type_by_name(
-                CONF.vpn_instance_type)
+        flavor = flavors.get_flavor_by_name(CONF.vpn_flavor)
         instance_name = '%s%s' % (context.project_id, CONF.vpn_key_suffix)
         user_data = self.get_encoded_zip(context.project_id)
         return self.compute_api.create(context,
-                                       instance_type,
+                                       flavor,
                                        CONF.vpn_image_id,
                                        display_name=instance_name,
                                        user_data=user_data,
@@ -140,13 +139,14 @@ class CloudPipe(object):
 
     def setup_security_group(self, context):
         group_name = '%s%s' % (context.project_id, CONF.vpn_key_suffix)
-        if db.security_group_exists(context, context.project_id, group_name):
-            return group_name
         group = {'user_id': context.user_id,
                  'project_id': context.project_id,
                  'name': group_name,
                  'description': 'Group for vpn'}
-        group_ref = db.security_group_create(context, group)
+        try:
+            group_ref = db.security_group_create(context, group)
+        except exception.SecurityGroupExists:
+            return group_name
         rule = {'parent_group_id': group_ref['id'],
                 'cidr': '0.0.0.0/0',
                 'protocol': 'udp',
@@ -167,15 +167,14 @@ class CloudPipe(object):
         key_name = '%s%s' % (context.project_id, CONF.vpn_key_suffix)
         try:
             keypair_api = compute.api.KeypairAPI()
-            result = keypair_api.create_key_pair(context,
-                                                 context.user_id,
-                                                 key_name)
-            private_key = result['private_key']
+            result, private_key = keypair_api.create_key_pair(context,
+                                                              context.user_id,
+                                                              key_name)
             key_dir = os.path.join(CONF.keys_path, context.user_id)
             fileutils.ensure_tree(key_dir)
             key_path = os.path.join(key_dir, '%s.pem' % key_name)
             with open(key_path, 'w') as f:
                 f.write(private_key)
-        except (exception.Duplicate, os.error, IOError):
+        except (exception.KeyPairExists, os.error, IOError):
             pass
         return key_name
